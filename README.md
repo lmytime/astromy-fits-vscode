@@ -2,11 +2,13 @@
 
 A Visual Studio Code extension to preview astronomical FITS files.
 
+> Install: Search `MyFits` in the VSCode extension store.
+
 ## Features
 
 The feature now is only to preview headers for FITS file in VSCode.
 
-> Currently this extension is a concept showcase and is under development. We are exploring more features.
+> Currently this extension is a **concept showcase** and is under development. We are exploring more features.
 
 ## Requirements
 
