@@ -1,0 +1,357 @@
+import * as vscode from 'vscode';
+import { Disposable, disposeAll } from './dispose';
+import { getNonce } from './util';
+import {PrimaryHDU} from 'fits-reader';
+
+
+
+
+/**
+ * Define the type of edits used in fits files.
+ */
+
+interface FitsDocumentDelegate {
+	getFileData(): Promise<object>;
+}
+
+/**
+ * Define the document (the data model) used for fits files.
+ */
+class FitsDocument extends Disposable implements vscode.CustomDocument {
+
+	static async create(
+		uri: vscode.Uri,
+		backupId: string | undefined,
+		delegate: FitsDocumentDelegate,
+	): Promise<FitsDocument | PromiseLike<FitsDocument>> {
+		// If we have a backup, read that. Otherwise read the resource from the workspace
+		const dataFile = typeof backupId === 'string' ? vscode.Uri.parse(backupId) : uri;
+		const fileData = await FitsDocument.readFile(dataFile);
+		return new FitsDocument(uri, fileData, delegate);
+	}
+
+	private static async readFile(uri: vscode.Uri): Promise<object> {
+		const fits = new PrimaryHDU(uri.fsPath);
+		const hdu = await fits.load();
+		const header = hdu.getHdu().getHeaderMap();
+		const headerObj = Object.fromEntries(header);
+		const structure = hdu.getStructures();
+		let Nhdus = 0;
+		let headerh_hdu = {"hdu0":headerObj}
+		if(structure){
+			Nhdus = 1 + structure.length;
+			for (let i = 0; i < structure.length; i++) {
+				const hh = structure[i].getHeaderMap();
+				const hho = Object.fromEntries(hh);
+				// add new key value pair to object
+				headerh_hdu = {...headerh_hdu, [`hdu${i+1}`]:hho};
+			}
+		}
+
+		return {Nhdus, "headers":headerh_hdu};
+	}
+
+	private readonly _uri: vscode.Uri;
+
+	private _documentData: object;
+
+	private readonly _delegate: FitsDocumentDelegate;
+
+	private constructor(
+		uri: vscode.Uri,
+		initialContent: object,
+		delegate: FitsDocumentDelegate
+	) {
+		super();
+		this._uri = uri;
+		this._documentData = initialContent;
+		this._delegate = delegate;
+	}
+
+	public get uri() { return this._uri; }
+
+	public get documentData(): object { return this._documentData; }
+
+	private readonly _onDidDispose = this._register(new vscode.EventEmitter<void>());
+	/**
+	 * Fired when the document is disposed of.
+	 */
+	public readonly onDidDispose = this._onDidDispose.event;
+
+	/**
+	 * Called by VS Code when there are no more references to the document.
+	 *
+	 * This happens when all editors for it have been closed.
+	 */
+	dispose(): void {
+		this._onDidDispose.fire();
+		super.dispose();
+	}
+}
+
+
+
+/**
+ * Provider for paw draw editors.
+ *
+ * Paw draw editors are used for `.pawDraw` files, which are just `.png` files with a different file extension.
+ *
+ * This provider demonstrates:
+ *
+ * - How to implement a custom editor for binary files.
+ * - Setting up the initial webview for a custom editor.
+ * - Loading scripts and styles in a custom editor.
+ * - Communication between VS Code and the custom editor.
+ * - Using CustomDocuments to store information that is shared between multiple custom editors.
+ * - Implementing save, undo, redo, and revert.
+ * - Backing up a custom editor.
+ */
+export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<FitsDocument> {
+
+	private static newPawDrawFileId = 1;
+
+	public static register(context: vscode.ExtensionContext): vscode.Disposable {
+		return vscode.window.registerCustomEditorProvider(
+			FitsEditorProvider.viewType,
+			new FitsEditorProvider(context),
+			{
+				// For this demo extension, we enable `retainContextWhenHidden` which keeps the
+				// webview alive even when it is not visible. You should avoid using this setting
+				// unless is absolutely required as it does have memory overhead.
+				// webviewOptions: {
+					// retainContextWhenHidden: false,
+				// },
+				supportsMultipleEditorsPerDocument: false,
+			});
+	}
+
+	private static readonly viewType = 'astronomy.fits';
+
+	/**
+	 * Tracks all known webviews
+	 */
+	private readonly webviews = new WebviewCollection();
+
+	constructor(
+		private readonly _context: vscode.ExtensionContext
+	) { }
+
+	//#region CustomEditorProvider
+	async openCustomDocument(
+		uri: vscode.Uri,
+		openContext: { backupId?: string },
+		_token: vscode.CancellationToken
+	): Promise<FitsDocument> {
+		const document: FitsDocument = await FitsDocument.create(uri, openContext.backupId, {
+			getFileData: async () => {
+				// console.log(document.uri.fsPath);
+
+				// const fits = new PrimaryHDU(document.uri.fsPath);
+				// const hdu = await fits.load();
+				// const header = hdu.getHdu().getHeaderMap();
+				// const headerString = Object.keys(header).map(key => `${key} = ${header.get(key)}`).join(';' + '\r');
+				// console.log(headerString);
+				// return headerString
+
+				// const webviewsForDocument = Array.from(this.webviews.get(document.uri));
+				// console.log(webviewsForDocument);
+				// console.log(123);
+
+
+				// if (!webviewsForDocument.length) {
+				// 	throw new Error('Could not find webview to save for');
+				// }
+				// const panel = webviewsForDocument[0];
+				// const response = await this.postMessageWithResponse<number[]>(panel, 'getFileData', {});
+
+				// return {response};
+				return {}
+				// console.log(response);
+
+				// return new Uint8Array(12313);
+				// return new Uint8Array(response)
+				// return new Uint8Array(response);
+			}
+		});
+
+		const listeners: vscode.Disposable[] = [];
+
+		// listeners.push(document.onDidChange(e => {
+		// 	// Tell VS Code that the document has been edited by the use.
+		// 	this._onDidChangeCustomDocument.fire({
+		// 		document,
+		// 		...e,
+		// 	});
+		// }));
+
+		// listeners.push(document.onDidChangeContent(e => {
+		// 	// Update all webviews when the document changes
+		// 	for (const webviewPanel of this.webviews.get(document.uri)) {
+		// 		this.postMessage(webviewPanel, 'update', {
+		// 			edits: e.edits,
+		// 			content: e.content,
+		// 		});
+		// 	}
+		// }));
+
+		document.onDidDispose(() => disposeAll(listeners));
+
+		return document;
+	}
+
+	async resolveCustomEditor(
+		document: FitsDocument,
+		webviewPanel: vscode.WebviewPanel,
+		_token: vscode.CancellationToken
+	): Promise<void> {
+		// Add the webview to our internal set of active webviews
+		this.webviews.add(document.uri, webviewPanel);
+		// console.log(document.uri, webviewPanel);
+		// console.log(FITS);
+
+
+		// Setup initial content for the webview
+		webviewPanel.webview.options = {
+			enableScripts: true,
+		};
+		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
+
+		webviewPanel.webview.onDidReceiveMessage(e => this.onMessage(document, e));
+
+		// Wait for the webview to be properly ready before we init
+		webviewPanel.webview.onDidReceiveMessage(e => {
+			if (e.type === 'ready') {
+				this.postMessage(webviewPanel, 'init', {
+					value: document.documentData
+					// document.documentData
+					// value: Buffer.from(document.documentData).toString()
+				});
+			}
+		});
+	}
+	//#endregion
+
+	/**
+	 * Get the static HTML used for in our editor's webviews.
+	 */
+	private getHtmlForWebview(webview: vscode.Webview): string {
+		// Local path to script and css for the webview
+		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(
+			this._context.extensionUri, 'media', 'fitsFile.js'));
+
+		// const scriptVue = webview.asWebviewUri(vscode.Uri.joinPath(
+		// 	this._context.extensionUri, 'media', 'vue.global.prod.js'));
+
+		// const scriptEle = webview.asWebviewUri(vscode.Uri.joinPath(
+		// 	this._context.extensionUri, 'media', 'element-plus.js'));
+
+		// const styleEle = webview.asWebviewUri(vscode.Uri.joinPath(
+		// 	this._context.extensionUri, 'media', 'element-plus.css'));
+
+		const styleResetUri = webview.asWebviewUri(vscode.Uri.joinPath(
+			this._context.extensionUri, 'media', 'reset.css'));
+
+		const styleVSCodeUri = webview.asWebviewUri(vscode.Uri.joinPath(
+			this._context.extensionUri, 'media', 'vscode.css'));
+
+		const styleMainUri = webview.asWebviewUri(vscode.Uri.joinPath(
+			this._context.extensionUri, 'media', 'fitsFile.css'));
+
+		// Use a nonce to whitelist which scripts can be run
+		const nonce = getNonce();
+
+		return /* html */`
+			<!DOCTYPE html>
+			<html lang="en">
+			<head>
+				<meta charset="UTF-8">
+
+				<!--
+				Use a content security policy to only allow loading images from https or from our extension directory,
+				and only allow scripts that have a specific nonce.
+				-->
+				<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} blob:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+
+				<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+				<link href="${styleResetUri}" rel="stylesheet" />
+				<link href="${styleVSCodeUri}" rel="stylesheet" />
+				<link href="${styleMainUri}" rel="stylesheet" />
+
+				<title>Fits File</title>
+			</head>
+			<body>
+				<div class="fits-container"></div>
+
+				<script nonce="${nonce}" src="${scriptUri}"></script>
+			</body>
+			</html>`;
+	}
+
+	// <script nonce="${nonce}" src="${scriptVue}"></script>
+	// <link href="${styleEle}" rel="stylesheet" />
+	// <script nonce="${nonce}" src="${scriptEle}"></script>
+
+	private _requestId = 1;
+	private readonly _callbacks = new Map<number, (response: any) => void>();
+
+	private postMessageWithResponse<R = unknown>(panel: vscode.WebviewPanel, type: string, body: any): Promise<R> {
+		const requestId = this._requestId++;
+		const p = new Promise<R>(resolve => this._callbacks.set(requestId, resolve));
+		panel.webview.postMessage({ type, requestId, body });
+		return p;
+	}
+
+	private postMessage(panel: vscode.WebviewPanel, type: string, body: any): void {
+		panel.webview.postMessage({ type, body });
+	}
+
+	private onMessage(document: FitsDocument, message: any) {
+		switch (message.type) {
+
+			case 'response':
+				{
+					const callback = this._callbacks.get(message.requestId);
+					callback?.(message.body);
+					return;
+				}
+		}
+	}
+}
+
+
+
+/**
+ * Tracks all webviews.
+ */
+class WebviewCollection {
+
+	private readonly _webviews = new Set<{
+		readonly resource: string;
+		readonly webviewPanel: vscode.WebviewPanel;
+	}>();
+
+	/**
+	 * Get all known webviews for a given uri.
+	 */
+	public *get(uri: vscode.Uri): Iterable<vscode.WebviewPanel> {
+		const key = uri.toString();
+		for (const entry of this._webviews) {
+			if (entry.resource === key) {
+				yield entry.webviewPanel;
+			}
+		}
+	}
+
+	/**
+	 * Add a new webview to the collection.
+	 */
+	public add(uri: vscode.Uri, webviewPanel: vscode.WebviewPanel) {
+		const entry = { resource: uri.toString(), webviewPanel };
+		this._webviews.add(entry);
+
+		webviewPanel.onDidDispose(() => {
+			this._webviews.delete(entry);
+		});
+	}
+}
