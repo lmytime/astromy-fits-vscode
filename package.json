@@ -3,7 +3,7 @@
   "displayName": "MyFits",
   "description": "A VSCode extension to preview .fits file.",
   "version": "0.0.1",
-	"publisher": "Mingyu Li",
+	"publisher": "lmytime",
 	"private": true,
 	"license": "MIT",
 	"repository": {
