@@ -1,9 +1,22 @@
 # Change Log
 
-All notable changes to the "astromy-fits-vscode" extension will be documented in this file.
+All notable changes to this project will be documented in this file.
 
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+The format is based on [Keep a Changelog](https://keepachangelog.com).
 
-## [Unreleased]
+## [0.0.2] - 2023-03-11
+### Added
+- Add logo for the extension, which is a galaxy-like logo. This logo is tentatively as the key logo of AstroMy project.
+- Add this CHANGELOG.md file to take notes for the development of this extension.
 
-- Initial release
+### Changed
+- Change the text color from cyan to the complementary colours of the background.
+
+### Removed
+- Remove the default helloworld command in the package.json file.
+
+
+## [0.0.1] - 2023-03-01
+### Added
+- This is the first release of Myfits -- VSCode extension to preview the astronomy fits files.
+- Only with the function of displaying headers.
