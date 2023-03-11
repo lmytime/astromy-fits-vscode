@@ -9,5 +9,6 @@ html, body {
 }
 
 .container{
-	color: aqua;
+	mix-blend-mode: difference;
+    color: #fff;
 }
