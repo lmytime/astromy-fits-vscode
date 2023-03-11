@@ -2,6 +2,7 @@
   "name": "astromy-fits-vscode",
   "displayName": "MyFits",
   "description": "A VSCode extension to preview .fits file.",
+  "icon": "media/logo.png",
   "version": "0.0.1",
 	"publisher": "lmytime",
 	"private": true,
@@ -21,12 +22,6 @@
   ],
   "main": "./dist/extension.js",
   "contributes": {
-    "commands": [
-      {
-        "command": "astromy-fits-vscode.helloWorld",
-        "title": "Hello World"
-      }
-    ],
     "customEditors": [
       {
         "viewType": "astronomy.fits",
