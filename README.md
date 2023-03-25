@@ -10,7 +10,7 @@ MyFits is a Visual Studio Code extension to preview astronomical FITS files.
 
 ## Features
 
-The feature now is only to **preview headers** for FITS file in VSCode.
+Now it can only **preview headers** for FITS file.
 
 > Currently this extension is a **concept showcase** and is under development. We are exploring more features.
 

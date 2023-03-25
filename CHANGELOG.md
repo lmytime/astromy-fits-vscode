@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com).
 
+## [0.1.1] - 2023-03-25
+### Changed
+- Update the readme and changelog.
+- remove some debug info and unused comments.
+
+
+## [0.1.0] - 2023-03-25
+### Added
+- Add the UI pape!
+
+### Changed
+- Change the color configuration.
+
+
 ## [0.0.2] - 2023-03-11
 ### Added
 - Add logo for the extension, which is a galaxy-like logo. This logo is tentatively as the key logo of AstroMy project.

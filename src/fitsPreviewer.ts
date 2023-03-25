@@ -119,7 +119,7 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 				// webview alive even when it is not visible. You should avoid using this setting
 				// unless is absolutely required as it does have memory overhead.
 				// webviewOptions: {
-					// retainContextWhenHidden: false,
+				// 	retainContextWhenHidden: false,
 				// },
 				supportsMultipleEditorsPerDocument: false,
 			});
@@ -144,33 +144,7 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 	): Promise<FitsDocument> {
 		const document: FitsDocument = await FitsDocument.create(uri, openContext.backupId, {
 			getFileData: async () => {
-				// console.log(document.uri.fsPath);
-
-				// const fits = new PrimaryHDU(document.uri.fsPath);
-				// const hdu = await fits.load();
-				// const header = hdu.getHdu().getHeaderMap();
-				// const headerString = Object.keys(header).map(key => `${key} = ${header.get(key)}`).join(';' + '\r');
-				// console.log(headerString);
-				// return headerString
-
-				// const webviewsForDocument = Array.from(this.webviews.get(document.uri));
-				// console.log(webviewsForDocument);
-				// console.log(123);
-
-
-				// if (!webviewsForDocument.length) {
-				// 	throw new Error('Could not find webview to save for');
-				// }
-				// const panel = webviewsForDocument[0];
-				// const response = await this.postMessageWithResponse<number[]>(panel, 'getFileData', {});
-
-				// return {response};
 				return {}
-				// console.log(response);
-
-				// return new Uint8Array(12313);
-				// return new Uint8Array(response)
-				// return new Uint8Array(response);
 			}
 		});
 
@@ -239,15 +213,6 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(
 			this._context.extensionUri, 'media', 'fitsFile.js'));
 
-		// const scriptVue = webview.asWebviewUri(vscode.Uri.joinPath(
-		// 	this._context.extensionUri, 'media', 'vue.global.prod.js'));
-
-		// const scriptEle = webview.asWebviewUri(vscode.Uri.joinPath(
-		// 	this._context.extensionUri, 'media', 'element-plus.js'));
-
-		// const styleEle = webview.asWebviewUri(vscode.Uri.joinPath(
-		// 	this._context.extensionUri, 'media', 'element-plus.css'));
-
 		const styleResetUri = webview.asWebviewUri(vscode.Uri.joinPath(
 			this._context.extensionUri, 'media', 'reset.css'));
 
@@ -256,6 +221,12 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 
 		const styleMainUri = webview.asWebviewUri(vscode.Uri.joinPath(
 			this._context.extensionUri, 'media', 'fitsFile.css'));
+
+		const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(
+			this._context.extensionUri, 'media', 'logo.png'));
+
+		const logoLargeUri = webview.asWebviewUri(vscode.Uri.joinPath(
+			this._context.extensionUri, 'media', 'logo-large.png'));
 
 		// Use a nonce to whitelist which scripts can be run
 		const nonce = getNonce();
@@ -281,6 +252,7 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 				<title>Fits File</title>
 			</head>
 			<body>
+				<header class="header"><img src="" alt="astromy" name="logo"></header>
 				<div class="fits-container"></div>
 
 				<script nonce="${nonce}" src="${scriptUri}"></script>
@@ -288,9 +260,6 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 			</html>`;
 	}
 
-	// <script nonce="${nonce}" src="${scriptVue}"></script>
-	// <link href="${styleEle}" rel="stylesheet" />
-	// <script nonce="${nonce}" src="${scriptEle}"></script>
 
 	private _requestId = 1;
 	private readonly _callbacks = new Map<number, (response: any) => void>();
