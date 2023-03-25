@@ -252,7 +252,6 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 				<title>Fits File</title>
 			</head>
 			<body>
-				<header class="header"><img src="" alt="astromy" name="logo"></header>
 				<div class="fits-container"></div>
 
 				<script nonce="${nonce}" src="${scriptUri}"></script>
