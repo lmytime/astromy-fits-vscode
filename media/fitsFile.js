@@ -124,18 +124,22 @@
 						tableRows.push([i, "PRIMARY", extType, GetDimesion(data.headers, i)])
 						continue
 					}
+					let extName = data.headers[`hdu${i}`]["EXTNAME"]
+					if (extName) {
+						extName = extName.replace(/'/g, "")
+					}
 					switch (data.headers[`hdu${i}`]["XTENSION"]) {
 						case "'IMAGE   '":
-							tableRows.push([i, data.headers[`hdu${i}`]["EXTNAME"].replace(/'/g, ''), "image", GetDimesion(data.headers, i)])
+							tableRows.push([i, extName, "image", GetDimesion(data.headers, i)])
 							break;
 						case "'BINTABLE'":
-							tableRows.push([i, data.headers[`hdu${i}`]["EXTNAME"].replace(/'/g, ''), "table", GetDimesion(data.headers, i)])
+							tableRows.push([i, extName, "table", GetDimesion(data.headers, i)])
 							break;
 						case "'TABLE   '":
-							tableRows.push([i, data.headers[`hdu${i}`]["EXTNAME"].replace(/'/g, ''), "table", GetDimesion(data.headers, i)])
+							tableRows.push([i, extName, "table", GetDimesion(data.headers, i)])
 							break;
 						default:
-							tableRows.push([i, data.headers[`hdu${i}`]["EXTNAME"].replace(/'/g, ''), "unknown", GetDimesion(data.headers, i)])
+							tableRows.push([i, extName, "unknown", GetDimesion(data.headers, i)])
 					}
 				}
 				createTable(leftContainer, "extTable", tableRows, tableHeaders);
