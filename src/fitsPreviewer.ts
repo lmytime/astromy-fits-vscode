@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { Disposable, disposeAll } from './dispose';
 import { getNonce } from './util';
-import {PrimaryHDU} from 'fits-reader';
+import { PrimaryHDU } from 'fits-reader';
 
 
 
@@ -34,21 +34,43 @@ class FitsDocument extends Disposable implements vscode.CustomDocument {
 		const fits = new PrimaryHDU(uri.fsPath);
 		const hdu = await fits.load();
 		const header = hdu.getHdu().getHeaderMap();
+		const rawheader = hdu.getHdu().getRawHeaders();
 		const headerObj = Object.fromEntries(header);
 		const structure = hdu.getStructures();
+		const rawheader_hdu = [rawheader]
+		rawheader_hdu.push(...structure.map((s) => s.getRawHeaders()));
+		// clear pure sapce-like values in the array rawheader_hdus
+		rawheader_hdu.forEach((h) => {
+			for (let key in h) {
+				if (typeof h[key] === "string" && h[key].trim() == "") {
+					delete h[key];
+				}
+			}
+		});
+
 		let Nhdus = 0;
-		let headerh_hdu = {"hdu0":headerObj}
-		if(structure){
+		let headerh_hdu = { "hdu0": headerObj }
+		if (structure) {
 			Nhdus = 1 + structure.length;
 			for (let i = 0; i < structure.length; i++) {
 				const hh = structure[i].getHeaderMap();
 				const hho = Object.fromEntries(hh);
 				// add new key value pair to object
-				headerh_hdu = {...headerh_hdu, [`hdu${i+1}`]:hho};
+				headerh_hdu = { ...headerh_hdu, [`hdu${i + 1}`]: hho };
 			}
 		}
 
-		return {Nhdus, "headers":headerh_hdu};
+		// Get the file size of the file of vscode.Uri type
+		const fileStat = await vscode.workspace.fs.stat(uri);
+		const fileSize = fileStat.size;
+		// make the file size human readable
+		const fileSizeInKB = fileSize / 1000;
+		const fileSizeInMB = fileSizeInKB / 1000;
+		const fileSizeInGB = fileSizeInMB / 1000;
+		const fileSizePretty = fileSizeInGB > 1 ? `${fileSizeInGB.toFixed(1)} GB` : fileSizeInMB > 1 ? `${fileSizeInMB.toFixed(1)} MB` : fileSizeInKB > 1 ? `${fileSizeInKB.toFixed(1)} KB` : `${fileSize} B`;
+
+		return { Nhdus, headers: headerh_hdu, filesize: fileSizePretty, rawheaders: rawheader_hdu };
+		// return {why: "why"};
 	}
 
 	private readonly _uri: vscode.Uri;
@@ -118,9 +140,9 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 				// For this demo extension, we enable `retainContextWhenHidden` which keeps the
 				// webview alive even when it is not visible. You should avoid using this setting
 				// unless is absolutely required as it does have memory overhead.
-				// webviewOptions: {
-				// 	retainContextWhenHidden: false,
-				// },
+				webviewOptions: {
+					retainContextWhenHidden: true,
+				},
 				supportsMultipleEditorsPerDocument: false,
 			});
 	}
@@ -144,7 +166,7 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 	): Promise<FitsDocument> {
 		const document: FitsDocument = await FitsDocument.create(uri, openContext.backupId, {
 			getFileData: async () => {
-				return {}
+				return {};
 			}
 		});
 

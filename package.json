@@ -3,22 +3,19 @@
   "displayName": "MyFits",
   "description": "A VSCode extension to preview .fits file.",
   "icon": "media/logo.png",
-  "version": "0.1.3",
-	"publisher": "lmytime",
-	"private": true,
-	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/lmytime/astromy-fits-vscode"
-	},
+  "version": "0.2.0",
+  "publisher": "lmytime",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lmytime/astromy-fits-vscode"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
     "Other"
-  ],
-  "activationEvents": [
-    "onCustomEditor:astronomy.fits"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -28,7 +25,7 @@
         "displayName": "Astronomy FITS",
         "selector": [
           {
-            "filenamePattern": "*.fits"
+            "filenamePattern": "*.{fits,fit,fts,arf,FIT,FITS,FTS,pi,pha}"
           }
         ]
       }

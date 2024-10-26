@@ -13,11 +13,13 @@
 
 		_initElements(/** @type {HTMLElement} */ parent) {
 			parent.innerHTML += `<header class="header"></header>
-			<div class="mid-container">
+			<div class="top-container">
 				<div class="left-container"></div>
+				<div class="divider-vertical" id="divider-vertical"></div>
 				<div class="right-container"></div>
 			</div>
-			<div class="content-container">
+			<div class="divider-horizontal" id="divider-horizontal"></div>
+			<div class="bottom-container">
 			<div>
 			Data (Image / Table) -- under developing
 			</div>
@@ -41,6 +43,10 @@
 
 				// top header
 				const Nhdu = data.Nhdus
+				const fileSize = data.filesize
+				const fileName = data.filename
+				const rawheader = data.rawheader
+				console.log(data);
 				// image extension number
 				let Nimg = 0;
 				let Ntab = 0;
@@ -60,7 +66,7 @@
 				// show basic information in the head
 				let title = document.createElement('div');
 				title.className = "title";
-				title.textContent = `${Nhdu} HDU${Nhdu > 1 ? 's' : ''}, ${Nimg} image${Nimg > 1 ? 's' : ''}, ${Ntab} table${Ntab > 1 ? 's' : ''}`;
+				title.innerHTML = `${Nhdu} HDU${Nhdu > 1 ? 's' : ''}<span id='longtitle'>, ${Nimg} image${Nimg > 1 ? 's' : ''}, ${Ntab} table${Ntab > 1 ? 's' : ''} <span id='filesize'>${fileSize}</span></span>`;
 				headerContainer.appendChild(title);
 
 
@@ -161,24 +167,10 @@
 							let cell = row.getElementsByTagName("td")[0];
 							let id = cell.innerHTML;
 							// show header of the selected HDU
-							showheader(data.headers[`hdu${id}`]);
+							rightContainer.innerHTML = `<pre>${data.rawheaders[id].join("<br>")}</pre>`;
 						};
 					};
 					currentRow.onclick = createClickHandler(currentRow);
-				}
-
-				function showheader(header) {
-					let headerRows = []
-					for (let key in header) {
-						if (key === 'END') {
-							headerRows.push(`END`);
-							continue;
-						}
-						// keep key to 8 characters
-						let skey = (key + "        ").slice(0, 8)
-						headerRows.push(`${skey}= ${header[key]}`)
-					}
-					rightContainer.innerHTML = `<pre>${headerRows.join("<br>")}</pre>`;
 				}
 			}
 		}
@@ -191,6 +183,7 @@
 	// Handle messages from the extension
 	window.addEventListener('message', async e => {
 		const { type, body, requestId } = e.data;
+		console.log(e.data);
 		switch (type) {
 			case 'init':
 				{
@@ -203,4 +196,58 @@
 
 	// Signal to VS Code that the webview is initialized.
 	vscode.postMessage({ type: 'ready' });
+
+	const dividerV = document.querySelector('.divider-vertical');
+	const left = document.querySelector('.left-container');
+	let isResizingW = false;
+
+	// 监听鼠标按下事件
+	dividerV.addEventListener('mousedown', (e) => {
+		isResizingW = true;
+		document.body.style.cursor = 'col-resize';
+	});
+
+	// 监听鼠标移动事件
+	document.addEventListener('mousemove', (e) => {
+		if (!isResizingW) return;
+
+		// 获取新的左侧宽度
+		const newLeftWidth = e.clientX;
+
+		// 设置左侧宽度，右侧根据 flex 自动适应
+		left.style.width = `${newLeftWidth-20}px`;
+	});
+
+	// 监听鼠标释放事件
+	document.addEventListener('mouseup', () => {
+		isResizingW = false;
+		document.body.style.cursor = 'default';
+	});
+
+	const dividerH = document.querySelector('.divider-horizontal');
+	const top = document.querySelector('.top-container');
+	let isResizingH = false;
+	// let isResizing = false;
+	// 监听鼠标按下事件
+	dividerH.addEventListener('mousedown', (e) => {
+		isResizingH = true;
+		document.body.style.cursor = 'row-resize';
+	});
+
+	// 监听鼠标移动事件
+	document.addEventListener('mousemove', (e) => {
+		if (!isResizingH) return;
+
+		// 获取新的左侧宽度
+		const newTopHeight = e.clientY;
+
+		// 设置左侧宽度，右侧根据 flex 自动适应
+		top.style.height = `${newTopHeight-50}px`;
+	});
+
+	// 监听鼠标释放事件
+	document.addEventListener('mouseup', () => {
+		isResizingH = false;
+		document.body.style.cursor = 'default';
+	});
 }());
