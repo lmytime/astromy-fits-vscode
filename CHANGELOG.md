@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com).
 
+## [0.2.1] - 2024-10-27
+### Changed
+- Resubmit adding change log.
+- add an example screenshot in the readme.
+
+## [0.2.0] - 2024-10-27
+### Fixed
+- Fixed bug that only part of headers are shown.
+### Added
+- Add a new feature to resize the divider bar.
+- Add a new feature to show the file size.
+
 ## [0.1.3] - 2023-03-25
 ### Fixed
 - Fixed bug when extension have no name.

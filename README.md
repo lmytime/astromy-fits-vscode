@@ -1,10 +1,14 @@
 # MyFits: astromy-fits-vscode
 
 <div style='text-align:center'>
-<img src="media/logo-large.png" width='300px'>
+<img src="media/logo-large.png" width='100px'>
 </div>
-
 MyFits is a Visual Studio Code extension to preview astronomical FITS files.
+
+
+<div style='text-align:center'>
+<img src="media/example_MyFits.png">
+</div>
 
 > Install: Search `MyFits` in the VSCode extension store.
 
