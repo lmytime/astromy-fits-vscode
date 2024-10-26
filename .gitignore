@@ -5,3 +5,4 @@ node_modules
 *.vsix
 exampleFiles/*
 .DS_Store
+.history
