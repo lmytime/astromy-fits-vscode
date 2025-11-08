@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { Disposable, disposeAll } from './dispose';
 import { getNonce } from './util';
-import { PrimaryHDU } from 'fits-reader';
+import { FitsHdu, loadImagePreviewAtOffset, parseFitsFile } from './fitsParser';
 
 
 
@@ -12,6 +12,16 @@ import { PrimaryHDU } from 'fits-reader';
 
 interface FitsDocumentDelegate {
 	getFileData(): Promise<object>;
+}
+
+interface FitsDocumentData {
+	Nhdus: number;
+	filesize: string;
+	filename: string;
+	filePath: string;
+	headers: Record<string, Record<string, any>>;
+	rawheaders: string[][];
+	hdus: FitsHdu[];
 }
 
 /**
@@ -30,58 +40,41 @@ class FitsDocument extends Disposable implements vscode.CustomDocument {
 		return new FitsDocument(uri, fileData, delegate);
 	}
 
-	private static async readFile(uri: vscode.Uri): Promise<object> {
-		const fits = new PrimaryHDU(uri.fsPath);
-		const hdu = await fits.load();
-		const header = hdu.getHdu().getHeaderMap();
-		const rawheader = hdu.getHdu().getRawHeaders();
-		const headerObj = Object.fromEntries(header);
-		const structure = hdu.getStructures();
-		const rawheader_hdu = [rawheader]
-		rawheader_hdu.push(...structure.map((s) => s.getRawHeaders()));
-		// clear pure sapce-like values in the array rawheader_hdus
-		rawheader_hdu.forEach((h) => {
-			for (let key in h) {
-				if (typeof h[key] === "string" && h[key].trim() == "") {
-					delete h[key];
-				}
-			}
+	private static async readFile(uri: vscode.Uri): Promise<FitsDocumentData> {
+		const result = await parseFitsFile(uri.fsPath, {
+			includeData: true,
+			maxImageBytes: 16 * 1024 * 1024,
+			maxTableBytes: 6 * 1024 * 1024,
+			maxTableRows: 256
 		});
 
-		let Nhdus = 0;
-		let headerh_hdu = { "hdu0": headerObj }
-		if (structure) {
-			Nhdus = 1 + structure.length;
-			for (let i = 0; i < structure.length; i++) {
-				const hh = structure[i].getHeaderMap();
-				const hho = Object.fromEntries(hh);
-				// add new key value pair to object
-				headerh_hdu = { ...headerh_hdu, [`hdu${i + 1}`]: hho };
-			}
-		}
+		const headers: Record<string, Record<string, any>> = {};
+		const rawheaders: string[][] = [];
+		result.hdus.forEach((hdu, idx) => {
+			headers[`hdu${idx}`] = hdu.header;
+			rawheaders.push(hdu.rawCards);
+		});
 
-		// Get the file size of the file of vscode.Uri type
-		const fileStat = await vscode.workspace.fs.stat(uri);
-		const fileSize = fileStat.size;
-		// make the file size human readable
-		const fileSizeInKB = fileSize / 1000;
-		const fileSizeInMB = fileSizeInKB / 1000;
-		const fileSizeInGB = fileSizeInMB / 1000;
-		const fileSizePretty = fileSizeInGB > 1 ? `${fileSizeInGB.toFixed(1)} GB` : fileSizeInMB > 1 ? `${fileSizeInMB.toFixed(1)} MB` : fileSizeInKB > 1 ? `${fileSizeInKB.toFixed(1)} KB` : `${fileSize} B`;
-
-		return { Nhdus, headers: headerh_hdu, filesize: fileSizePretty, rawheaders: rawheader_hdu };
-		// return {why: "why"};
+		return {
+			Nhdus: result.hdus.length,
+			headers,
+			rawheaders,
+			filesize: formatFileSize(result.fileSize),
+			filename: result.fileName,
+			filePath: uri.fsPath,
+			hdus: result.hdus
+		};
 	}
 
 	private readonly _uri: vscode.Uri;
 
-	private _documentData: object;
+	private _documentData: FitsDocumentData;
 
 	private readonly _delegate: FitsDocumentDelegate;
 
 	private constructor(
 		uri: vscode.Uri,
-		initialContent: object,
+		initialContent: FitsDocumentData,
 		delegate: FitsDocumentDelegate
 	) {
 		super();
@@ -92,7 +85,7 @@ class FitsDocument extends Disposable implements vscode.CustomDocument {
 
 	public get uri() { return this._uri; }
 
-	public get documentData(): object { return this._documentData; }
+	public get documentData(): FitsDocumentData { return this._documentData; }
 
 	private readonly _onDidDispose = this._register(new vscode.EventEmitter<void>());
 	/**
@@ -212,7 +205,7 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 		};
 		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
-		webviewPanel.webview.onDidReceiveMessage(e => this.onMessage(document, e));
+			webviewPanel.webview.onDidReceiveMessage(e => this.onMessage(document, webviewPanel, e));
 
 		// Wait for the webview to be properly ready before we init
 		webviewPanel.webview.onDidReceiveMessage(e => {
@@ -296,18 +289,53 @@ export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<F
 		panel.webview.postMessage({ type, body });
 	}
 
-	private onMessage(document: FitsDocument, message: any) {
-		switch (message.type) {
+		private onMessage(document: FitsDocument, panel: vscode.WebviewPanel, message: any) {
+			switch (message.type) {
 
-			case 'response':
-				{
-					const callback = this._callbacks.get(message.requestId);
-					callback?.(message.body);
+				case 'response':
+					{
+						const callback = this._callbacks.get(message.requestId);
+						callback?.(message.body);
+						return;
+					}
+				case 'requestImage':
+					this.handleImageRequest(document, panel, message);
 					return;
+			}
+		}
+
+		private async handleImageRequest(document: FitsDocument, panel: vscode.WebviewPanel, message: any) {
+			const index = typeof message?.hduIndex === 'number' ? message.hduIndex : -1;
+			if (index < 0) {
+				this.postMessage(panel, 'payloadError', { index, error: 'Invalid HDU index.' });
+				return;
+			}
+
+			const docData = document.documentData;
+			const target = docData.hdus[index];
+			if (!target) {
+				this.postMessage(panel, 'payloadError', { index, error: 'Unable to locate the requested HDU.' });
+				return;
+			}
+
+			try {
+				const preview = await loadImagePreviewAtOffset(docData.filePath, target);
+				if (!preview) {
+					throw new Error('Image payload is unavailable for this HDU.');
 				}
+				target.imagePreview = preview;
+				target.dataSkippedReason = undefined;
+
+				const payload = { index, preview };
+				for (const view of this.webviews.get(document.uri)) {
+					this.postMessage(view, 'imageLoaded', payload);
+				}
+			} catch (error: any) {
+				const messageText = error instanceof Error ? error.message : String(error);
+				this.postMessage(panel, 'payloadError', { index, error: messageText });
+			}
 		}
 	}
-}
 
 
 
@@ -344,4 +372,14 @@ class WebviewCollection {
 			this._webviews.delete(entry);
 		});
 	}
+}
+
+function formatFileSize(bytes: number): string {
+	if (!bytes) {
+		return '0 B';
+	}
+	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+	const value = bytes / Math.pow(1024, exponent);
+	return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[exponent]}`;
 }

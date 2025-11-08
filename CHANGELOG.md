@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com).
 
+## [0.2.2] - 2024-10-28
+### Changed
+- Overhauled the FITS image viewer to stream full-depth pixel data, default to z-scale cuts, and show true pixel values in the metadata bar.
+- Moved zoom/scale controls into the metadata row (preset percentiles plus colour cycling) with a live `vmin/vmax` overlay.
+- Rebuilt the canvas renderer to match the JS9-style pan/zoom flow (fit-to-view by default, translation even for small images, zoom buttons+wheels centered on the viewport) while eliminating the old custom-cut panel.
+- Added a WCS readout (RA/Dec) whenever a CD matrix exists and flipped the image vertically so pixel `(0,0)` sits at the lower-left; rendering now keeps the pixelated look no matter how far you zoom in.
+- Default zoom now fits the viewport, centers automatically, and prevents drift when the image is smaller than the window; dedicated +/- buttons keep zooming around the current view center.
+- Large FITS payloads no longer embed massive pixel arrays in the initial message, preventing `Invalid string length` crashes; oversized images require an explicit “Load image” action.
+
 ## [0.2.1] - 2024-10-27
 ### Changed
 - Resubmit adding change log.

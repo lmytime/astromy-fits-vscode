@@ -6,3 +6,4 @@ node_modules
 exampleFiles/*
 .DS_Store
 .history
+example_program/*
