@@ -5,26 +5,34 @@
 </div>
 MyFits is a Visual Studio Code extension to preview astronomical FITS files.
 
+> Install: Search `MyFits` in the VSCode extension store.
 
+Image data:
 <div style='text-align:center'>
-<img src="media/example_MyFits.png">
+<img src="media/img_example_MyFits.jpg">
 </div>
 
-> Install: Search `MyFits` in the VSCode extension store.
+---
+
+Table data:
+<div style='text-align:center'>
+<img src="media/table_example_MyFits.png">
+</div>
 
 ## Features
 
-- Inspect every HDU header inside FITS, PHA, PI, ARF, and related files.
-- Render interactive previews of 2-D image extensions with zoom, stretch, and color-map controls inspired by JS9.
-- Display searchable binary/ASCII table snippets (column units + row filtering) alongside keyword search within headers.
-- Skip bulk pixel payloads automatically when files exceed the preview limit, while offering a manual “Load image anyway” action for huge datasets.
+- Inspect every HDU header inside FITS, PHA, PI, ARF, and related files with instant keyword search.
+- Render interactive 2‑D images with pixel-level zooming, panning, colour-map cycling, and vmin/vmax presets (ZScale or 90–100 % coverage). WCS keywords (CD/PC+CDELT) automatically expose RA/Dec in the metadata bar.
+- Preview binary/ASCII tables with column metadata, row filtering, and a guaranteed “first row” view even when the full HDU exceeds the inline limit.
+- Skip bulk payloads automatically when images exceed ~30 MB or tables exceed ~15 MB (decimal base), while offering a one-click “Load […] anyway” action for huge datasets.
 
 > This extension is still under active development; please share ideas or issues!
 
 ## Known Issues
 
-- Files larger than ~2 GB load in header-only mode; image/table payloads are skipped with a warning to keep VS Code responsive.
+- Extremely large files (>2 GB) are loaded in header-only mode; image/table payloads are skipped with a warning to keep VS Code responsive.
 - Variable-length or highly custom table descriptors are surfaced as `[unsupported]` cells in the preview.
+- Images are not shwon in pixelized grid.
 
 ## Release Notes
 

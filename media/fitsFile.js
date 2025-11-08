@@ -970,46 +970,21 @@
         const crpix2 = headerNumber(header['CRPIX2']);
         const crval1 = headerNumber(header['CRVAL1']);
         const crval2 = headerNumber(header['CRVAL2']);
-        const matrix = readWcsMatrix(header);
-        if ([crpix1, crpix2, crval1, crval2].some(value => !Number.isFinite(value)) || !matrix) {
+        const cd11 = headerNumber(header['CD1_1']);
+        const cd12 = headerNumber(header['CD1_2']);
+        const cd21 = headerNumber(header['CD2_1']);
+        const cd22 = headerNumber(header['CD2_2']);
+        if ([crpix1, crpix2, crval1, crval2, cd11, cd12, cd21, cd22].some(value => !Number.isFinite(value))) {
             return undefined;
         }
         return {
             refPixel: [crpix1, crpix2],
             refWorld: [crval1, crval2],
-            matrix,
+            matrix: [
+                [cd11, cd12],
+                [cd21, cd22],
+            ],
         };
-    }
-
-    function readWcsMatrix(header) {
-        const cd = readMatrix(header, 'CD');
-        if (cd) {
-            return cd;
-        }
-        const pc = readMatrix(header, 'PC');
-        const cdelt1 = headerNumber(header['CDELT1']);
-        const cdelt2 = headerNumber(header['CDELT2']);
-        if (pc && Number.isFinite(cdelt1) && Number.isFinite(cdelt2)) {
-            return [
-                [pc[0][0] * cdelt1, pc[0][1] * cdelt2],
-                [pc[1][0] * cdelt1, pc[1][1] * cdelt2],
-            ];
-        }
-        return undefined;
-    }
-
-    function readMatrix(header, prefix) {
-        const a11 = headerNumber(header[`${prefix}1_1`]);
-        const a12 = headerNumber(header[`${prefix}1_2`]);
-        const a21 = headerNumber(header[`${prefix}2_1`]);
-        const a22 = headerNumber(header[`${prefix}2_2`]);
-        if ([a11, a12, a21, a22].some(value => !Number.isFinite(value))) {
-            return undefined;
-        }
-        return [
-            [a11, a12],
-            [a21, a22],
-        ];
     }
 
     function pixelToWorld(x, y, wcs) {

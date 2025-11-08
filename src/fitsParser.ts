@@ -3,8 +3,8 @@ import * as path from 'path';
 
 const BLOCK_SIZE = 2880;
 const CARD_SIZE = 80;
-const DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25 MB
-const DEFAULT_MAX_TABLE_BYTES = 8 * 1024 * 1024; // 8 MB
+const DEFAULT_MAX_IMAGE_BYTES = 30 * 1000 * 1000; // 30 MB
+const DEFAULT_MAX_TABLE_BYTES = 15 * 1000 * 1000; // 15 MB
 const DEFAULT_MAX_TABLE_ROWS = 200;
 const MAX_EMBEDDED_IMAGE_VALUES = 1_000_000;
 
@@ -123,23 +123,23 @@ export async function parseFitsFile(filePath: string, options?: FitsParseOptions
 			const tableRowLength = typeof header['NAXIS1'] === 'number' ? header['NAXIS1'] : 0;
 			const tableRowCount = typeof header['NAXIS2'] === 'number' ? header['NAXIS2'] : 0;
 
-				if (hasData && includeData) {
-					if (isImageHdu && typeof bitpix === 'number' && bitpix !== 0) {
-						if (dataBytes <= maxImageBytes) {
-							imagePreview = await readImagePreview(fileHandle, dataStart, dimensions, bitpix, dataBytes);
-							if (imagePreview && imagePreview.values && imagePreview.values.length > MAX_EMBEDDED_IMAGE_VALUES) {
-								imagePreview.values = undefined;
-								if (!dataSkippedReason) {
-									dataSkippedReason = 'Image data is large; click Load image anyway.';
-								}
+			if (hasData && includeData) {
+				if (isImageHdu && typeof bitpix === 'number' && bitpix !== 0) {
+					if (dataBytes <= maxImageBytes) {
+						imagePreview = await readImagePreview(fileHandle, dataStart, dimensions, bitpix, dataBytes);
+						if (imagePreview && imagePreview.values && imagePreview.values.length > MAX_EMBEDDED_IMAGE_VALUES) {
+							imagePreview.values = undefined;
+							if (!dataSkippedReason) {
+								dataSkippedReason = 'Image data is large; click Load image anyway.';
 							}
-						} else {
-							dataSkippedReason = `Image data (${humanFileSize(dataBytes)}) exceeds preview limit (${humanFileSize(maxImageBytes)}).`;
 						}
-					} else if (isTableHdu) {
-					if (dataBytes <= maxTableBytes) {
-						tablePreview = await readTablePreview(fileHandle, dataStart, header, maxTableRows, dataBytes, type === 'TABLE');
 					} else {
+						dataSkippedReason = `Image data (${humanFileSize(dataBytes)}) exceeds preview limit (${humanFileSize(maxImageBytes)}).`;
+					}
+				} else if (isTableHdu) {
+					const rowLimit = dataBytes <= maxTableBytes ? maxTableRows : 1;
+					tablePreview = await readTablePreview(fileHandle, dataStart, header, rowLimit, dataBytes, type === 'TABLE');
+					if (dataBytes > maxTableBytes) {
 						dataSkippedReason = `Table data (${humanFileSize(dataBytes)}) exceeds preview limit (${humanFileSize(maxTableBytes)}).`;
 					}
 				}
@@ -640,7 +640,7 @@ function humanFileSize(bytes: number): string {
 		return '0 B';
 	}
 	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-	const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-	const value = bytes / Math.pow(1024, exponent);
+	const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1000)));
+	const value = bytes / Math.pow(1000, exponent);
 	return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[exponent]}`;
 }

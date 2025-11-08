@@ -43,8 +43,8 @@ class FitsDocument extends Disposable implements vscode.CustomDocument {
 	private static async readFile(uri: vscode.Uri): Promise<FitsDocumentData> {
 		const result = await parseFitsFile(uri.fsPath, {
 			includeData: true,
-			maxImageBytes: 16 * 1024 * 1024,
-			maxTableBytes: 6 * 1024 * 1024,
+			maxImageBytes: 30 * 1024 * 1024,
+			maxTableBytes: 15 * 1024 * 1024,
 			maxTableRows: 256
 		});
 
