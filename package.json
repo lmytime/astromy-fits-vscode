@@ -3,7 +3,7 @@
   "displayName": "MyFits",
   "description": "A VSCode extension to preview .fits file.",
   "icon": "media/logo.png",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "lmytime",
   "private": true,
   "license": "MIT",

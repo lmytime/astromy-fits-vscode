@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com).
 
+## [0.3.1] - 2026-01-21
+### Fixed
+- Fixing the bug of image blinking.
+
 ## [0.3.0] - 2025-11-09
 ### Added
 - Add new functions to preview image and table data.
