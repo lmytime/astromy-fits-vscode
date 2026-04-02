@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com).
 
+## [0.4.0] - 2026-04-02
+### Added
+- Add a lightweight built-in FITS image viewer with pixel-preserving zoom, pan, colormap switching, invert, percentile and Min/Max scale presets.
+- Add real-time local WCS readout in the image status bar with RA/Dec shown in ICRS degrees.
+- Add fast table pagination with global row search and fixed non-scrolling table controls.
+
+### Changed
+- Rework the preview pipeline to load FITS manifests first and fetch image/table payloads on demand.
+- Move image preview to an extension-host fast path so small image HDUs open much faster.
+- Move table preview to a local parser/cache path, making small tables load quickly and making global search responsive.
+- Refine the bottom preview layout, metadata bar, footer, and table/image styling to better match the rest of the extension UI.
+
+### Removed
+- Remove the old JS9-based image preview path and the unused Pyodide/Astropy worker pipeline.
+- Remove vendored JS9/Pyodide assets, obsolete helper scripts, and other dead code/resources that were no longer used at runtime.
+
 ## [0.3.1] - 2026-01-21
 ### Fixed
 - Fixing the bug of image blinking.

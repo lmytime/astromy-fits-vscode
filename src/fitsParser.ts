@@ -1,80 +1,75 @@
 import { open, stat } from 'fs/promises';
+import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 
 const BLOCK_SIZE = 2880;
 const CARD_SIZE = 80;
-const DEFAULT_MAX_IMAGE_BYTES = 30 * 1000 * 1000; // 30 MB
-const DEFAULT_MAX_TABLE_BYTES = 15 * 1000 * 1000; // 15 MB
-const DEFAULT_MAX_TABLE_ROWS = 200;
-const MAX_EMBEDDED_IMAGE_VALUES = 1_000_000;
 
 export type HduType = 'PRIMARY' | 'IMAGE' | 'BINTABLE' | 'TABLE' | 'UNKNOWN';
+export type HduKind = 'image' | 'table' | 'other';
 
-export interface FitsParseOptions {
-	includeData?: boolean;
-	maxImageBytes?: number;
-	maxTableBytes?: number;
-	maxTableRows?: number;
+export interface HduManifest {
+	index: number;
+	type: HduType;
+	kind: HduKind;
+	extName?: string;
+	dimensions: number[];
+	bitpix?: number;
+	hasData: boolean;
+	headerOffset: number;
+	headerByteLength: number;
+	dataOffset: number;
+	dataByteLength: number;
+	dataByteLengthPadded: number;
+	isAsciiTable: boolean;
+	tableRowLength?: number;
+	tableRowCount?: number;
 }
 
-export interface ImagePreview {
+export interface FitsManifest {
+	filePath: string;
+	fileName: string;
+	fileSize: number;
+	hduCount: number;
+	hdus: HduManifest[];
+}
+
+export interface ImagePreviewData {
 	width: number;
 	height: number;
-	bitpix: number;
-	values?: number[];
-	min: number;
-	max: number;
-	truncated: boolean;
+	pixels: Float32Array;
+	scaleModes: Record<string, [number, number]>;
+	defaultScaleMode: 'zscale';
+	defaultStretch: 'linear';
+	wcs: LinearCelestialWcs | null;
 }
 
-export interface TablePreview {
-	columns: TableColumn[];
-	rows: string[][];
-	totalRows: number;
-	truncated: boolean;
-	message?: string;
+export interface LinearCelestialWcs {
+	frame: 'ICRS';
+	unit: 'deg';
+	projection: 'TAN' | 'LINEAR';
+	crpix: [number, number];
+	crval: [number, number];
+	cd: [[number, number], [number, number]];
 }
 
 export interface TableColumn {
 	index: number;
 	name: string;
-	unit?: string;
-	format?: string;
-	typeHint: string;
+	unit: string;
+	format: string;
+	dim: string;
+	dtype: string;
 	byteWidth: number;
 	repeat: number;
 	typeCode: string;
 }
 
-export interface DataLocation {
-	offset: number;
-	length: number;
-	kind: 'image' | 'table' | 'other';
-	isAsciiTable?: boolean;
-	rowLength?: number;
-	rowCount?: number;
-}
-
-export interface FitsHdu {
-	index: number;
-	type: HduType;
-	name?: string;
-	header: Record<string, any>;
-	rawCards: string[];
-	dimensions: number[];
-	bitpix?: number;
-	hasData: boolean;
-	dataLocation?: DataLocation;
-	imagePreview?: ImagePreview;
-	tablePreview?: TablePreview;
-	dataSkippedReason?: string;
-}
-
-export interface FitsParseResult {
-	filePath: string;
-	fileName: string;
-	fileSize: number;
-	hdus: FitsHdu[];
+export interface TablePreviewData {
+	columns: TableColumn[];
+	rows: string[][];
+	searchIndex: string[];
+	totalRows: number;
 }
 
 interface HeaderBlock {
@@ -83,102 +78,59 @@ interface HeaderBlock {
 	byteLength: number;
 }
 
-export async function parseFitsFile(filePath: string, options?: FitsParseOptions): Promise<FitsParseResult> {
+export async function scanFitsManifest(filePath: string): Promise<FitsManifest> {
 	const stats = await stat(filePath);
 	const fileSize = stats.size;
 	const fileHandle = await open(filePath, 'r');
-	const maxImageBytes = options?.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
-	const maxTableBytes = options?.maxTableBytes ?? DEFAULT_MAX_TABLE_BYTES;
-	const maxTableRows = options?.maxTableRows ?? DEFAULT_MAX_TABLE_ROWS;
-	const includeData = options?.includeData ?? true;
 
-	const hdus: FitsHdu[] = [];
+	const hdus: HduManifest[] = [];
 	let offset = 0;
 	let index = 0;
 
 	try {
 		while (offset < fileSize) {
-			const headerBlock = await readHeaderBlock(fileHandle, fileSize, offset);
+			const headerOffset = offset;
+			const headerBlock = await readHeaderBlock(fileHandle, fileSize, headerOffset);
 			if (!headerBlock) {
 				break;
 			}
 
-			const { header, rawCards, byteLength } = headerBlock;
+			const { header, byteLength } = headerBlock;
 			offset += byteLength;
 
 			const type = determineHduType(header, index);
-			const name = typeof header['EXTNAME'] === 'string' ? header['EXTNAME'].trim() : undefined;
+			const kind = determineHduKind(header, type, index);
+			const extName = readExtName(header);
 			const dimensions = readDimensions(header);
-			const bitpix = typeof header['BITPIX'] === 'number' ? header['BITPIX'] : undefined;
-			const dataBytes = calculateDataBytes(header, type, dimensions, bitpix);
-			const paddedDataBytes = padToBlock(dataBytes);
-			const dataStart = offset;
-
-			let imagePreview: ImagePreview | undefined;
-			let tablePreview: TablePreview | undefined;
-			let dataSkippedReason: string | undefined;
-			const hasData = dataBytes > 0;
-			const isImageHdu = isImageLike(type, index, dimensions);
-			const isTableHdu = isTableLike(type);
-			const tableRowLength = typeof header['NAXIS1'] === 'number' ? header['NAXIS1'] : 0;
-			const tableRowCount = typeof header['NAXIS2'] === 'number' ? header['NAXIS2'] : 0;
-
-			if (hasData && includeData) {
-				if (isImageHdu && typeof bitpix === 'number' && bitpix !== 0) {
-					if (dataBytes <= maxImageBytes) {
-						imagePreview = await readImagePreview(fileHandle, dataStart, dimensions, bitpix, dataBytes);
-						if (imagePreview && imagePreview.values && imagePreview.values.length > MAX_EMBEDDED_IMAGE_VALUES) {
-							imagePreview.values = undefined;
-							if (!dataSkippedReason) {
-								dataSkippedReason = 'Image data is large; click Load image anyway.';
-							}
-						}
-					} else {
-						dataSkippedReason = `Image data (${humanFileSize(dataBytes)}) exceeds preview limit (${humanFileSize(maxImageBytes)}).`;
-					}
-				} else if (isTableHdu) {
-					const rowLimit = dataBytes <= maxTableBytes ? maxTableRows : 1;
-					tablePreview = await readTablePreview(fileHandle, dataStart, header, rowLimit, dataBytes, type === 'TABLE');
-					if (dataBytes > maxTableBytes) {
-						dataSkippedReason = `Table data (${humanFileSize(dataBytes)}) exceeds preview limit (${humanFileSize(maxTableBytes)}).`;
-					}
-				}
-			} else if (hasData && !includeData) {
-				dataSkippedReason = 'Data loading disabled.';
-			}
-
-			offset += paddedDataBytes;
-
-			const dataKind: DataLocation['kind'] = isImageHdu ? 'image' : (isTableHdu ? 'table' : 'other');
-			const dataLocation = hasData ? {
-				offset: dataStart,
-				length: dataBytes,
-				kind: dataKind,
-				isAsciiTable: isTableHdu ? type === 'TABLE' : undefined,
-				rowLength: isTableHdu ? tableRowLength : undefined,
-				rowCount: isTableHdu ? tableRowCount : undefined,
-			} : undefined;
+			const bitpix = typeof header.BITPIX === 'number' ? header.BITPIX : undefined;
+			const dataByteLength = calculateDataBytes(header, type, dimensions, bitpix);
+			const dataByteLengthPadded = padToBlock(dataByteLength);
+			const dataOffset = offset;
+			const hasData = dataByteLength > 0;
+			const isAsciiTable = type === 'TABLE';
+			const tableRowLength = typeof header.NAXIS1 === 'number' ? header.NAXIS1 : undefined;
+			const tableRowCount = typeof header.NAXIS2 === 'number' ? header.NAXIS2 : undefined;
 
 			hdus.push({
 				index,
 				type,
-				name,
-				header,
-				rawCards,
+				kind,
+				extName,
 				dimensions,
 				bitpix,
 				hasData,
-				dataLocation,
-				imagePreview,
-				tablePreview,
-				dataSkippedReason
+				headerOffset,
+				headerByteLength: byteLength,
+				dataOffset,
+				dataByteLength,
+				dataByteLengthPadded,
+				isAsciiTable,
+				tableRowLength,
+				tableRowCount,
 			});
 
+			offset += dataByteLengthPadded;
 			index += 1;
-
-			if (offset >= fileSize) {
-				break;
-			}
 		}
 	} finally {
 		await fileHandle.close();
@@ -188,25 +140,121 @@ export async function parseFitsFile(filePath: string, options?: FitsParseOptions
 		filePath,
 		fileName: path.basename(filePath),
 		fileSize,
-		hdus
+		hduCount: hdus.length,
+		hdus,
 	};
 }
 
-export async function loadImagePreviewAtOffset(filePath: string, hdu: FitsHdu): Promise<ImagePreview | undefined> {
-	if (!hdu.dataLocation || hdu.dataLocation.kind !== 'image' || typeof hdu.bitpix !== 'number' || hdu.bitpix === 0) {
-		return undefined;
-	}
-
+export async function loadHeaderCards(filePath: string, hdu: HduManifest): Promise<string[]> {
+	const fileStats = await stat(filePath);
 	const fileHandle = await open(filePath, 'r');
 	try {
-		return await readImagePreview(fileHandle, hdu.dataLocation.offset, hdu.dimensions, hdu.bitpix, hdu.dataLocation.length);
+		const headerBlock = await readHeaderBlock(fileHandle, fileStats.size, hdu.headerOffset);
+		if (!headerBlock) {
+			throw new Error(`Unable to read header for HDU ${hdu.index}.`);
+		}
+		return headerBlock.rawCards;
+	} finally {
+		await fileHandle.close();
+	}
+}
+
+export async function loadImagePreview(filePath: string, hdu: HduManifest): Promise<ImagePreviewData> {
+	if (hdu.kind !== 'image') {
+		throw new Error(`HDU ${hdu.index} does not contain image data.`);
+	}
+	if (typeof hdu.bitpix !== 'number') {
+		throw new Error(`HDU ${hdu.index} is missing BITPIX.`);
+	}
+
+	const width = Math.max(1, hdu.dimensions[0] ?? 0);
+	const height = Math.max(1, hdu.dimensions[1] ?? 1);
+	const planePixels = width * height;
+	const bytesPerPixel = Math.abs(hdu.bitpix) / 8;
+	const planeByteLength = planePixels * bytesPerPixel;
+
+	const fileStats = await stat(filePath);
+	const fileHandle = await open(filePath, 'r');
+	try {
+		const headerBlock = await readHeaderBlock(fileHandle, fileStats.size, hdu.headerOffset);
+		if (!headerBlock) {
+			throw new Error(`Unable to read header for HDU ${hdu.index}.`);
+		}
+
+		const planeBytes = await readBytes(fileHandle, hdu.dataOffset, planeByteLength);
+		if (planeBytes.byteLength < planeByteLength) {
+			throw new Error(`Unexpected end of file while reading HDU ${hdu.index} image data.`);
+		}
+
+			const pixels = decodeImagePixels(planeBytes, hdu.bitpix, headerBlock.header, planePixels);
+			return {
+				width,
+				height,
+				pixels,
+				scaleModes: computeScaleModes(pixels),
+				defaultScaleMode: 'zscale',
+				defaultStretch: 'linear',
+				wcs: extractCelestialWcs(headerBlock.header),
+			};
+		} finally {
+			await fileHandle.close();
+		}
+	}
+
+export async function loadTablePreview(filePath: string, hdu: HduManifest): Promise<TablePreviewData> {
+	if (hdu.kind !== 'table') {
+		throw new Error(`HDU ${hdu.index} does not contain table data.`);
+	}
+
+	const fileStats = await stat(filePath);
+	const fileHandle = await open(filePath, 'r');
+	try {
+		const headerBlock = await readHeaderBlock(fileHandle, fileStats.size, hdu.headerOffset);
+		if (!headerBlock) {
+			throw new Error(`Unable to read header for HDU ${hdu.index}.`);
+		}
+
+		const header = headerBlock.header;
+		const rowLength = typeof header.NAXIS1 === 'number' ? header.NAXIS1 : 0;
+		const rowCount = typeof header.NAXIS2 === 'number' ? header.NAXIS2 : 0;
+		const fieldCount = typeof header.TFIELDS === 'number' ? header.TFIELDS : 0;
+		if (rowLength <= 0 || rowCount <= 0 || fieldCount <= 0) {
+			return {
+				columns: [],
+				rows: [],
+				searchIndex: [],
+				totalRows: rowCount,
+			};
+		}
+
+		const columns = buildTableColumns(header, hdu.isAsciiTable);
+		const tableBytes = await readBytes(fileHandle, hdu.dataOffset, hdu.dataByteLength);
+		if (tableBytes.byteLength < hdu.dataByteLength) {
+			throw new Error(`Unexpected end of file while reading HDU ${hdu.index} table data.`);
+		}
+
+		const rows: string[][] = [];
+		const searchIndex: string[] = [];
+		for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+			const rowStart = rowIndex * rowLength;
+			const row = parseTableRow(tableBytes.subarray(rowStart, rowStart + rowLength), columns, hdu.isAsciiTable);
+			rows.push(row);
+			searchIndex.push(row.join(' \u241f ').toLowerCase());
+		}
+
+		return {
+			columns,
+			rows,
+			searchIndex,
+			totalRows: rowCount,
+		};
 	} finally {
 		await fileHandle.close();
 	}
 }
 
 async function readHeaderBlock(
-	fileHandle: import('fs/promises').FileHandle,
+	fileHandle: FileHandle,
 	fileSize: number,
 	startOffset: number
 ): Promise<HeaderBlock | undefined> {
@@ -237,8 +285,11 @@ async function readHeaderBlock(
 			}
 
 			if (keyword === 'END') {
-				const consumed = offset - startOffset;
-				return { header, rawCards, byteLength: consumed };
+				return {
+					header,
+					rawCards,
+					byteLength: offset - startOffset,
+				};
 			}
 
 			if (keyword === 'COMMENT' || keyword === 'HISTORY') {
@@ -259,8 +310,7 @@ async function readHeaderBlock(
 			const valuePortion = card.substring(eqIndex + 1);
 			const slashIndex = valuePortion.indexOf('/');
 			const rawValue = (slashIndex >= 0 ? valuePortion.substring(0, slashIndex) : valuePortion).trim();
-			const parsedValue = parseFitsValue(rawValue);
-			header[keyword] = parsedValue;
+			header[keyword] = parseFitsValue(rawValue);
 		}
 
 		if (bytesRead < BLOCK_SIZE) {
@@ -271,10 +321,28 @@ async function readHeaderBlock(
 	return undefined;
 }
 
+async function readBytes(fileHandle: FileHandle, start: number, length: number): Promise<Buffer> {
+	const buffer = Buffer.alloc(length);
+	let bytesRemaining = length;
+	let offset = start;
+	let position = 0;
+
+	while (bytesRemaining > 0) {
+		const { bytesRead } = await fileHandle.read(buffer, position, bytesRemaining, offset);
+		if (bytesRead === 0) {
+			break;
+		}
+		bytesRemaining -= bytesRead;
+		offset += bytesRead;
+		position += bytesRead;
+	}
+
+	return bytesRemaining === 0 ? buffer : buffer.slice(0, position);
+}
+
 function parseFitsValue(rawValue: string): any {
-	if (rawValue.startsWith("'") && rawValue.endsWith("'")) {
-		const unquoted = rawValue.slice(1, -1);
-		return unquoted.replace(/''/g, "'");
+	if (rawValue.startsWith('\'') && rawValue.endsWith('\'')) {
+		return rawValue.slice(1, -1).replace(/''/g, '\'');
 	}
 
 	if (rawValue === 'T' || rawValue === 'F') {
@@ -297,8 +365,8 @@ function determineHduType(header: Record<string, any>, index: number): HduType {
 		return 'PRIMARY';
 	}
 
-	const extension = typeof header['XTENSION'] === 'string'
-		? header['XTENSION'].replace(/'/g, '').trim().toUpperCase()
+	const extension = typeof header.XTENSION === 'string'
+		? header.XTENSION.replace(/'/g, '').trim().toUpperCase()
 		: undefined;
 
 	switch (extension) {
@@ -313,23 +381,31 @@ function determineHduType(header: Record<string, any>, index: number): HduType {
 	}
 }
 
-function isImageLike(type: HduType, index: number, dimensions: number[]): boolean {
+function determineHduKind(header: Record<string, any>, type: HduType, index: number): HduKind {
+	const dimensions = readDimensions(header);
 	if (index === 0 && dimensions.length > 0) {
-		return true;
+		return 'image';
 	}
-	return type === 'IMAGE';
+	if (type === 'IMAGE') {
+		return 'image';
+	}
+	if (type === 'BINTABLE' || type === 'TABLE') {
+		return 'table';
+	}
+	return 'other';
 }
 
-function isTableLike(type: HduType): boolean {
-	return type === 'BINTABLE' || type === 'TABLE';
+function readExtName(header: Record<string, any>): string | undefined {
+	return typeof header.EXTNAME === 'string'
+		? header.EXTNAME.replace(/'/g, '').trim()
+		: undefined;
 }
 
 function readDimensions(header: Record<string, any>): number[] {
-	const nAxis = typeof header['NAXIS'] === 'number' ? header['NAXIS'] : 0;
+	const nAxis = typeof header.NAXIS === 'number' ? header.NAXIS : 0;
 	const dims: number[] = [];
 	for (let i = 1; i <= nAxis; i++) {
-		const key = `NAXIS${i}`;
-		const value = typeof header[key] === 'number' ? header[key] : 0;
+		const value = typeof header[`NAXIS${i}`] === 'number' ? header[`NAXIS${i}`] : 0;
 		dims.push(value);
 	}
 	return dims;
@@ -337,10 +413,10 @@ function readDimensions(header: Record<string, any>): number[] {
 
 function calculateDataBytes(header: Record<string, any>, type: HduType, dimensions: number[], bitpix?: number): number {
 	if (type === 'BINTABLE' || type === 'TABLE') {
-		const rowLength = typeof header['NAXIS1'] === 'number' ? header['NAXIS1'] : 0;
-		const rows = typeof header['NAXIS2'] === 'number' ? header['NAXIS2'] : 0;
-		const gcount = typeof header['GCOUNT'] === 'number' ? header['GCOUNT'] : 1;
-		const pcount = typeof header['PCOUNT'] === 'number' ? header['PCOUNT'] : 0;
+		const rowLength = typeof header.NAXIS1 === 'number' ? header.NAXIS1 : 0;
+		const rows = typeof header.NAXIS2 === 'number' ? header.NAXIS2 : 0;
+		const gcount = typeof header.GCOUNT === 'number' ? header.GCOUNT : 1;
+		const pcount = typeof header.PCOUNT === 'number' ? header.PCOUNT : 0;
 		return rowLength * rows * Math.max(1, gcount) + Math.max(0, pcount);
 	}
 
@@ -361,178 +437,83 @@ function padToBlock(size: number): number {
 	return remainder === 0 ? size : size + (BLOCK_SIZE - remainder);
 }
 
-async function readImagePreview(
-	fileHandle: import('fs/promises').FileHandle,
-	dataStart: number,
-	dimensions: number[],
+function decodeImagePixels(
+	bytes: Buffer,
 	bitpix: number,
-	dataBytes: number
-): Promise<ImagePreview | undefined> {
-	const width = dimensions[0] ?? 1;
-	const height = dimensions[1] ?? 1;
-	const planePixels = width * height;
-	if (planePixels === 0) {
-		return undefined;
-	}
+	header: Record<string, any>,
+	pixelCount: number
+): Float32Array {
+	const pixels = new Float32Array(pixelCount);
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const bscale = typeof header.BSCALE === 'number' ? header.BSCALE : 1;
+	const bzero = typeof header.BZERO === 'number' ? header.BZERO : 0;
+	const blank = typeof header.BLANK === 'number' ? header.BLANK : undefined;
+	const applyScaling = bscale !== 1 || bzero !== 0;
 
-	const bytesPerPixel = Math.abs(bitpix) / 8;
-	const planeBytes = planePixels * bytesPerPixel;
-	if (planeBytes === 0) {
-		return undefined;
-	}
-
-	const buffer = Buffer.alloc(Math.min(planeBytes, dataBytes));
-	await fileHandle.read(buffer, 0, buffer.length, dataStart);
-
-	const values = readNumericValues(buffer, bitpix);
-	const { min, max } = getValueBounds(values);
-
-	return {
-		width,
-		height,
-		bitpix,
-		values,
-		min,
-		max,
-		truncated: dataBytes > buffer.length
-	};
-}
-
-function readNumericValues(buffer: Buffer, bitpix: number): number[] {
-	const values: number[] = [];
-	const bytesPerValue = Math.abs(bitpix) / 8;
-	for (let offset = 0; offset < buffer.length; offset += bytesPerValue) {
+	for (let index = 0; index < pixelCount; index += 1) {
+		const offset = index * Math.abs(bitpix / 8);
+		let value: number;
 		switch (bitpix) {
 			case 8:
-				values.push(buffer.readUInt8(offset));
+				value = view.getUint8(offset);
 				break;
 			case 16:
-				values.push(buffer.readInt16BE(offset));
+				value = view.getInt16(offset, false);
 				break;
 			case 32:
-				values.push(buffer.readInt32BE(offset));
+				value = view.getInt32(offset, false);
 				break;
 			case 64:
-				values.push(Number(buffer.readBigInt64BE(offset)));
+				value = Number(view.getBigInt64(offset, false));
 				break;
 			case -32:
-				values.push(buffer.readFloatBE(offset));
+				value = view.getFloat32(offset, false);
 				break;
 			case -64:
-				values.push(buffer.readDoubleBE(offset));
+				value = view.getFloat64(offset, false);
 				break;
 			default:
-				values.push(0);
-				break;
+				throw new Error(`Unsupported BITPIX ${bitpix} for image preview.`);
 		}
+
+		if (typeof blank === 'number' && value === blank) {
+			pixels[index] = Number.NaN;
+			continue;
+		}
+
+		pixels[index] = applyScaling ? value * bscale + bzero : value;
 	}
-	return values;
+
+	return pixels;
 }
 
-function getValueBounds(values: number[]): { min: number; max: number } {
-	let min = Infinity;
-	let max = -Infinity;
-	for (const value of values) {
-		if (value < min) {
-			min = value;
-		}
-		if (value > max) {
-			max = value;
-		}
-	}
-	if (!Number.isFinite(min)) {
-		min = 0;
-	}
-	if (!Number.isFinite(max)) {
-		max = min;
-	}
-	if (min === max) {
-		max = min + 1;
-	}
-	return { min, max };
-}
-
-async function readTablePreview(
-	fileHandle: import('fs/promises').FileHandle,
-	dataStart: number,
-	header: Record<string, any>,
-	maxRows: number,
-	dataBytes: number,
-	isAsciiTable: boolean
-): Promise<TablePreview | undefined> {
-	const rowLength = typeof header['NAXIS1'] === 'number' ? header['NAXIS1'] : 0;
-	const rowCount = typeof header['NAXIS2'] === 'number' ? header['NAXIS2'] : 0;
-	const tfFields = typeof header['TFIELDS'] === 'number' ? header['TFIELDS'] : 0;
-
-	if (rowLength === 0 || rowCount === 0 || tfFields === 0) {
-		return undefined;
-	}
-
+function buildTableColumns(header: Record<string, any>, isAsciiTable: boolean): TableColumn[] {
+	const fieldCount = typeof header.TFIELDS === 'number' ? header.TFIELDS : 0;
 	const columns: TableColumn[] = [];
-	for (let i = 1; i <= tfFields; i++) {
-		const nameRaw = header[`TTYPE${i}`];
-		const name = typeof nameRaw === 'string' ? nameRaw.replace(/'/g, '').trim() : `COL${i}`;
-		const unitRaw = header[`TUNIT${i}`];
-		const unit = typeof unitRaw === 'string' ? unitRaw.replace(/'/g, '').trim() : undefined;
-		const formatRaw = header[`TFORM${i}`];
-		const format = typeof formatRaw === 'string' ? formatRaw.replace(/'/g, '').trim() : undefined;
+	for (let index = 1; index <= fieldCount; index += 1) {
+		const nameRaw = header[`TTYPE${index}`];
+		const unitRaw = header[`TUNIT${index}`];
+		const formatRaw = header[`TFORM${index}`];
+		const dimRaw = header[`TDIM${index}`];
+		const format = typeof formatRaw === 'string' ? formatRaw.replace(/'/g, '').trim() : '';
 		const layout = resolveColumnLayout(format, isAsciiTable);
-
 		columns.push({
-			index: i,
-			name,
-			unit,
+			index,
+			name: typeof nameRaw === 'string' ? nameRaw.replace(/'/g, '').trim() : `COL${index}`,
+			unit: typeof unitRaw === 'string' ? unitRaw.replace(/'/g, '').trim() : '',
 			format,
-			typeHint: format ?? 'A',
+			dim: typeof dimRaw === 'string' ? dimRaw.replace(/'/g, '').trim() : '',
+			dtype: inferColumnDtype(layout.typeCode, layout.repeat),
 			byteWidth: layout.byteWidth,
 			repeat: layout.repeat,
-			typeCode: layout.typeCode
+			typeCode: layout.typeCode,
 		});
 	}
-
-	const rowsRequested = Math.max(1, Math.min(rowCount, maxRows));
-	const maxRowsByBytes = rowLength === 0 ? 0 : Math.floor(dataBytes / rowLength);
-	const rowsToRead = Math.min(rowsRequested, maxRowsByBytes);
-
-	if (rowsToRead <= 0) {
-		return {
-			columns,
-			rows: [],
-			totalRows: rowCount,
-			truncated: true,
-			message: 'No complete table rows available for preview.'
-		};
-	}
-
-	const previewBytes = rowsToRead * rowLength;
-	const buffer = Buffer.alloc(previewBytes);
-	await fileHandle.read(buffer, 0, previewBytes, dataStart);
-
-	const rows: string[][] = [];
-	for (let rowIndex = 0; rowIndex < rowsToRead; rowIndex++) {
-		const rowStart = rowIndex * rowLength;
-		if (rowStart >= buffer.length) {
-			break;
-		}
-		const row = parseTableRow(buffer.slice(rowStart, rowStart + rowLength), columns, isAsciiTable);
-		rows.push(row);
-	}
-
-	return {
-		columns,
-		rows,
-		totalRows: rowCount,
-		truncated: rowsToRead < rowCount,
-		message: rowsToRead < rowCount ? `Showing first ${rowsToRead} of ${rowCount} rows.` : undefined
-	};
+	return columns;
 }
 
-function resolveColumnLayout(format: string | undefined, isAsciiTable: boolean): { byteWidth: number; repeat: number; typeCode: string } {
-	if (!format) {
-		return { byteWidth: 1, repeat: 1, typeCode: 'A' };
-	}
-
-	const cleaned = format.replace(/'/g, '').trim().toUpperCase();
+function resolveColumnLayout(format: string, isAsciiTable: boolean): { byteWidth: number; repeat: number; typeCode: string } {
+	const cleaned = (format || 'A').toUpperCase();
 	if (isAsciiTable) {
 		const digits = cleaned.match(/\d+/);
 		const width = digits ? Number.parseInt(digits[0], 10) : 1;
@@ -541,51 +522,41 @@ function resolveColumnLayout(format: string | undefined, isAsciiTable: boolean):
 		return {
 			byteWidth: Math.max(1, width),
 			repeat: 1,
-			typeCode
+			typeCode,
 		};
 	}
 
 	const match = cleaned.match(/^(\d+)?([A-Z])/);
 	const repeat = match?.[1] ? Number.parseInt(match[1], 10) : 1;
 	const typeCode = match?.[2] ?? 'A';
-	const byteWidth = Math.max(1, repeat * elementByteSize(typeCode));
-	return { byteWidth, repeat, typeCode };
+	return {
+		byteWidth: Math.max(1, repeat * elementByteSize(typeCode)),
+		repeat,
+		typeCode,
+	};
 }
 
-function parseTableRow(buffer: Buffer, columns: TableColumn[], isAsciiTable: boolean): string[] {
-	const values: string[] = [];
-	let offset = 0;
-
-	for (const column of columns) {
-		const byteWidth = column.byteWidth || 1;
-		const slice = buffer.slice(offset, offset + byteWidth);
-		offset += byteWidth;
-
-		if (slice.length === 0) {
-			values.push('');
-			continue;
+function inferColumnDtype(typeCode: string, repeat: number): string {
+	const baseType = (() => {
+		switch (typeCode) {
+			case 'L': return 'logical';
+			case 'A': return 'string';
+			case 'B': return 'uint8';
+			case 'I': return 'int16';
+			case 'J': return 'int32';
+			case 'K': return 'int64';
+			case 'E': return 'float32';
+			case 'D': return 'float64';
+			default: return 'unknown';
 		}
-
-		if (isAsciiTable) {
-			values.push(slice.toString('ascii').trim());
-			continue;
-		}
-
-		if (column.typeCode === 'A') {
-			values.push(slice.toString('ascii').trim());
-			continue;
-		}
-
-		const parsed = parseBinaryValue(slice, column.typeCode, column.repeat || 1);
-		values.push(parsed);
-	}
-
-	return values;
+	})();
+	return repeat > 1 && typeCode !== 'A' ? `${baseType}[${repeat}]` : baseType;
 }
 
 function elementByteSize(typeCode: string): number {
 	switch (typeCode) {
 		case 'L':
+		case 'A':
 		case 'B':
 			return 1;
 		case 'I':
@@ -601,10 +572,26 @@ function elementByteSize(typeCode: string): number {
 	}
 }
 
+function parseTableRow(rowBuffer: Uint8Array, columns: TableColumn[], isAsciiTable: boolean): string[] {
+	const buffer = Buffer.from(rowBuffer.buffer, rowBuffer.byteOffset, rowBuffer.byteLength);
+	const values: string[] = [];
+	let offset = 0;
+	for (const column of columns) {
+		const slice = buffer.subarray(offset, offset + column.byteWidth);
+		offset += column.byteWidth;
+		if (isAsciiTable || column.typeCode === 'A') {
+			values.push(slice.toString('ascii').trim());
+			continue;
+		}
+		values.push(parseBinaryValue(slice, column.typeCode, column.repeat));
+	}
+	return values;
+}
+
 function parseBinaryValue(slice: Buffer, typeCode: string, repeat: number): string {
 	const results: string[] = [];
-	for (let i = 0; i < repeat; i++) {
-		const offset = i * elementByteSize(typeCode);
+	for (let index = 0; index < repeat; index += 1) {
+		const offset = index * elementByteSize(typeCode);
 		switch (typeCode) {
 			case 'L':
 				results.push(slice[offset] === 84 ? 'T' : 'F');
@@ -622,25 +609,214 @@ function parseBinaryValue(slice: Buffer, typeCode: string, repeat: number): stri
 				results.push(Number(slice.readBigInt64BE(offset)).toString());
 				break;
 			case 'E':
-				results.push(slice.readFloatBE(offset).toFixed(4));
+				results.push(formatFloat(slice.readFloatBE(offset)));
 				break;
 			case 'D':
-				results.push(slice.readDoubleBE(offset).toFixed(4));
+				results.push(formatFloat(slice.readDoubleBE(offset)));
 				break;
 			default:
 				results.push('[unsupported]');
 		}
 	}
-
 	return repeat === 1 ? results[0] : `[${results.join(', ')}]`;
 }
 
-function humanFileSize(bytes: number): string {
-	if (bytes === 0) {
-		return '0 B';
+function formatFloat(value: number): string {
+	if (!Number.isFinite(value)) {
+		return String(value);
 	}
-	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-	const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1000)));
-	const value = bytes / Math.pow(1000, exponent);
-	return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[exponent]}`;
+	return Math.abs(value) >= 1000 || Math.abs(value) < 0.001
+		? value.toExponential(4)
+		: value.toFixed(6).replace(/\.?0+$/, '');
+}
+
+function computeScaleModes(pixels: Float32Array): Record<string, [number, number]> {
+	const sample = collectFiniteSample(pixels);
+	if (!sample.length) {
+		return {
+			zscale: [0, 1],
+			pct90: [0, 1],
+			pct95: [0, 1],
+			pct99: [0, 1],
+			pct995: [0, 1],
+			pct999: [0, 1],
+			pct9995: [0, 1],
+			pct9999: [0, 1],
+			minmax: [0, 1],
+		};
+	}
+
+	sample.sort((left, right) => left - right);
+	const minimum = sample[0];
+	const maximum = sample[sample.length - 1];
+
+	return {
+		zscale: normalizeLimits(computeFastZScale(sample)),
+		pct90: normalizeLimits([percentileSorted(sample, 0.10), percentileSorted(sample, 0.90)]),
+		pct95: normalizeLimits([percentileSorted(sample, 0.05), percentileSorted(sample, 0.95)]),
+		pct99: normalizeLimits([percentileSorted(sample, 0.01), percentileSorted(sample, 0.99)]),
+		pct995: normalizeLimits([percentileSorted(sample, 0.005), percentileSorted(sample, 0.995)]),
+		pct999: normalizeLimits([percentileSorted(sample, 0.001), percentileSorted(sample, 0.999)]),
+		pct9995: normalizeLimits([percentileSorted(sample, 0.0005), percentileSorted(sample, 0.9995)]),
+		pct9999: normalizeLimits([percentileSorted(sample, 0.0001), percentileSorted(sample, 0.9999)]),
+		minmax: normalizeLimits([minimum, maximum]),
+	};
+}
+
+function collectFiniteSample(pixels: Float32Array, maxSamples = 16384): number[] {
+	const total = pixels.length;
+	const step = Math.max(1, Math.floor(total / maxSamples));
+	const sample: number[] = [];
+	for (let index = 0; index < total; index += step) {
+		const value = pixels[index];
+		if (Number.isFinite(value)) {
+			sample.push(value);
+		}
+	}
+	return sample;
+}
+
+function percentileSorted(sortedValues: number[], fraction: number): number {
+	if (!sortedValues.length) {
+		return 0;
+	}
+	const clamped = Math.min(1, Math.max(0, fraction));
+	const position = clamped * (sortedValues.length - 1);
+	const lowerIndex = Math.floor(position);
+	const upperIndex = Math.min(sortedValues.length - 1, Math.ceil(position));
+	if (lowerIndex === upperIndex) {
+		return sortedValues[lowerIndex];
+	}
+	const mix = position - lowerIndex;
+	return sortedValues[lowerIndex] + (sortedValues[upperIndex] - sortedValues[lowerIndex]) * mix;
+}
+
+function computeFastZScale(sortedValues: number[]): [number, number] {
+	if (sortedValues.length < 8) {
+		return [sortedValues[0], sortedValues[sortedValues.length - 1]];
+	}
+
+	const contrast = 0.25;
+	const median = percentileSorted(sortedValues, 0.5);
+	const lowAnchor = percentileSorted(sortedValues, 0.05);
+	const highAnchor = percentileSorted(sortedValues, 0.95);
+	const span = highAnchor - lowAnchor;
+	if (!Number.isFinite(span) || span <= 0) {
+		return [sortedValues[0], sortedValues[sortedValues.length - 1]];
+	}
+
+	const slope = span / Math.max(1, 0.90 * (sortedValues.length - 1));
+	const midpoint = (sortedValues.length - 1) / 2;
+	const lower = median - (midpoint * slope) / contrast;
+	const upper = median + ((sortedValues.length - 1 - midpoint) * slope) / contrast;
+	return [
+		Math.max(sortedValues[0], lower),
+		Math.min(sortedValues[sortedValues.length - 1], upper),
+	];
+}
+
+function normalizeLimits(limits: [number, number]): [number, number] {
+	const [rawLow, rawHigh] = limits;
+	if (!Number.isFinite(rawLow) || !Number.isFinite(rawHigh)) {
+		return [0, 1];
+	}
+	if (rawHigh > rawLow) {
+		return [rawLow, rawHigh];
+	}
+	const span = Math.abs(rawLow) || 1;
+	return [rawLow - span * 0.5, rawHigh + span * 0.5];
+}
+
+function extractCelestialWcs(header: Record<string, any>): LinearCelestialWcs | null {
+	const ctype1 = typeof header.CTYPE1 === 'string' ? header.CTYPE1.toUpperCase() : '';
+	const ctype2 = typeof header.CTYPE2 === 'string' ? header.CTYPE2.toUpperCase() : '';
+	if (
+		!ctype1.startsWith('RA') ||
+		!ctype2.startsWith('DEC') ||
+		typeof header.CRVAL1 !== 'number' ||
+		typeof header.CRVAL2 !== 'number' ||
+		typeof header.CRPIX1 !== 'number' ||
+		typeof header.CRPIX2 !== 'number'
+	) {
+		return null;
+	}
+
+	const cd = computeCdMatrix(header);
+	if (!cd) {
+		return null;
+	}
+
+	const unitScale1 = angularUnitToDegrees(header.CUNIT1);
+	const unitScale2 = angularUnitToDegrees(header.CUNIT2);
+	const matrix: [[number, number], [number, number]] = [
+		[cd[0][0] * unitScale1, cd[0][1] * unitScale1],
+		[cd[1][0] * unitScale2, cd[1][1] * unitScale2],
+	];
+	const determinant = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+	if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-16) {
+		return null;
+	}
+
+	const projection = ctype1.includes('TAN') && ctype2.includes('TAN') ? 'TAN' : 'LINEAR';
+	return {
+		frame: 'ICRS',
+		unit: 'deg',
+		projection,
+		crpix: [header.CRPIX1, header.CRPIX2],
+		crval: [header.CRVAL1 * unitScale1, header.CRVAL2 * unitScale2],
+		cd: matrix,
+	};
+}
+
+function computeCdMatrix(header: Record<string, any>): [[number, number], [number, number]] | null {
+	const cd11 = asNumber(header.CD1_1);
+	const cd12 = asNumber(header.CD1_2);
+	const cd21 = asNumber(header.CD2_1);
+	const cd22 = asNumber(header.CD2_2);
+	if ([cd11, cd12, cd21, cd22].every(value => typeof value === 'number')) {
+		return [[cd11!, cd12!], [cd21!, cd22!]];
+	}
+
+	const cdelt1 = asNumber(header.CDELT1);
+	const cdelt2 = asNumber(header.CDELT2);
+	if (typeof cdelt1 !== 'number' || typeof cdelt2 !== 'number') {
+		return null;
+	}
+
+	const pc11 = asNumber(header.PC1_1) ?? 1;
+	const pc12 = asNumber(header.PC1_2) ?? 0;
+	const pc21 = asNumber(header.PC2_1) ?? 0;
+	const pc22 = asNumber(header.PC2_2) ?? 1;
+	if (
+		typeof header.PC1_1 === 'number' ||
+		typeof header.PC1_2 === 'number' ||
+		typeof header.PC2_1 === 'number' ||
+		typeof header.PC2_2 === 'number'
+	) {
+		return [
+			[pc11 * cdelt1, pc12 * cdelt2],
+			[pc21 * cdelt1, pc22 * cdelt2],
+		];
+	}
+
+	const crota = asNumber(header.CROTA2) ?? asNumber(header.CROTA1) ?? 0;
+	const angle = crota * (Math.PI / 180);
+	const cos = Math.cos(angle);
+	const sin = Math.sin(angle);
+	return [
+		[cdelt1 * cos, -cdelt2 * sin],
+		[cdelt1 * sin, cdelt2 * cos],
+	];
+}
+
+function angularUnitToDegrees(unitValue: unknown): number {
+	const unit = typeof unitValue === 'string' ? unitValue.replace(/'/g, '').trim().toLowerCase() : '';
+	if (unit === 'rad' || unit === 'radian' || unit === 'radians') {
+		return 180 / Math.PI;
+	}
+	return 1;
+}
+
+function asNumber(value: unknown): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }

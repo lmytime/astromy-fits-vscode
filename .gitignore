@@ -7,3 +7,4 @@ exampleFiles/*
 .DS_Store
 .history
 example_program/*
+.npm-cache

@@ -1,380 +1,459 @@
 import * as vscode from 'vscode';
 import { Disposable, disposeAll } from './dispose';
 import { getNonce } from './util';
-import { FitsHdu, loadImagePreviewAtOffset, parseFitsFile } from './fitsParser';
+import { loadImagePreview, loadTablePreview, type FitsManifest, type HduManifest, type TablePreviewData, loadHeaderCards, scanFitsManifest } from './fitsParser';
 
+const DEFAULT_TABLE_PAGE_SIZE = 50;
+const TABLE_PAGE_SIZES = [50, 100, 200, 500];
 
+type RequestMethod = 'getHeaderCards' | 'getImagePreview' | 'getTableMeta' | 'getTablePage';
 
-
-/**
- * Define the type of edits used in fits files.
- */
-
-interface FitsDocumentDelegate {
-	getFileData(): Promise<object>;
+interface RequestMessage {
+	type: 'request';
+	requestId: number;
+	method: RequestMethod;
+	args?: Record<string, any>;
 }
 
-interface FitsDocumentData {
-	Nhdus: number;
-	filesize: string;
-	filename: string;
-	filePath: string;
-	headers: Record<string, Record<string, any>>;
-	rawheaders: string[][];
-	hdus: FitsHdu[];
+interface InitPayload {
+	manifest: FitsManifest;
+	config: {
+		defaultTablePageSize: number;
+		tablePageSizes: number[];
+	};
 }
 
-/**
- * Define the document (the data model) used for fits files.
- */
-class FitsDocument extends Disposable implements vscode.CustomDocument {
+class LruCache<K, V> {
+	constructor(private readonly limit: number) { }
 
-	static async create(
-		uri: vscode.Uri,
-		backupId: string | undefined,
-		delegate: FitsDocumentDelegate,
-	): Promise<FitsDocument | PromiseLike<FitsDocument>> {
-		// If we have a backup, read that. Otherwise read the resource from the workspace
-		const dataFile = typeof backupId === 'string' ? vscode.Uri.parse(backupId) : uri;
-		const fileData = await FitsDocument.readFile(dataFile);
-		return new FitsDocument(uri, fileData, delegate);
+	private readonly store = new Map<K, V>();
+
+	public get(key: K): V | undefined {
+		const value = this.store.get(key);
+		if (typeof value === 'undefined') {
+			return undefined;
+		}
+		this.store.delete(key);
+		this.store.set(key, value);
+		return value;
 	}
 
-	private static async readFile(uri: vscode.Uri): Promise<FitsDocumentData> {
-		const result = await parseFitsFile(uri.fsPath, {
-			includeData: true,
-			maxImageBytes: 30 * 1024 * 1024,
-			maxTableBytes: 15 * 1024 * 1024,
-			maxTableRows: 256
-		});
+	public set(key: K, value: V): void {
+		if (this.store.has(key)) {
+			this.store.delete(key);
+		}
+		this.store.set(key, value);
+		if (this.store.size > this.limit) {
+			const oldest = this.store.keys().next().value as K | undefined;
+			if (typeof oldest !== 'undefined') {
+				this.store.delete(oldest);
+			}
+		}
+	}
+}
 
-		const headers: Record<string, Record<string, any>> = {};
-		const rawheaders: string[][] = [];
-		result.hdus.forEach((hdu, idx) => {
-			headers[`hdu${idx}`] = hdu.header;
-			rawheaders.push(hdu.rawCards);
-		});
+class FitsDocument extends Disposable implements vscode.CustomDocument {
+	public static async create(uri: vscode.Uri, backupId: string | undefined): Promise<FitsDocument> {
+		const dataFile = typeof backupId === 'string' ? vscode.Uri.parse(backupId) : uri;
+		const manifest = await scanFitsManifest(dataFile.fsPath);
+		return new FitsDocument(uri, manifest);
+	}
 
+	private readonly headerCardsCache = new LruCache<number, string[]>(24);
+	private readonly tablePreviewCache = new LruCache<number, TablePreviewData>(8);
+	private readonly tableSearchCache = new Map<number, { term: string; matches: number[] }>();
+	private readonly inflightHeaderCards = new Map<number, Promise<string[]>>();
+	private readonly inflightTablePreviews = new Map<number, Promise<TablePreviewData>>();
+
+	private constructor(
+		private readonly _uri: vscode.Uri,
+		private readonly _documentData: FitsManifest
+	) {
+		super();
+	}
+
+	public get uri(): vscode.Uri { return this._uri; }
+	public get documentData(): FitsManifest { return this._documentData; }
+
+	private readonly _onDidDispose = this._register(new vscode.EventEmitter<void>());
+	public readonly onDidDispose = this._onDidDispose.event;
+
+	public async getHeaderCards(index: number): Promise<string[]> {
+		const cached = this.headerCardsCache.get(index);
+		if (cached) {
+			return cached;
+		}
+
+		const existing = this.inflightHeaderCards.get(index);
+		if (existing) {
+			return existing;
+		}
+
+		const hdu = this.getHdu(index);
+		const promise = loadHeaderCards(this._documentData.filePath, hdu)
+			.then(cards => {
+				this.headerCardsCache.set(index, cards);
+				this.inflightHeaderCards.delete(index);
+				return cards;
+			})
+			.catch(error => {
+				this.inflightHeaderCards.delete(index);
+				throw error;
+			});
+
+		this.inflightHeaderCards.set(index, promise);
+		return promise;
+	}
+
+	public async getTableMeta(index: number): Promise<{ columns: TablePreviewData['columns']; totalRows: number }> {
+		const table = await this.getTablePreview(index);
 		return {
-			Nhdus: result.hdus.length,
-			headers,
-			rawheaders,
-			filesize: formatFileSize(result.fileSize),
-			filename: result.fileName,
-			filePath: uri.fsPath,
-			hdus: result.hdus
+			columns: table.columns,
+			totalRows: table.totalRows,
 		};
 	}
 
-	private readonly _uri: vscode.Uri;
+	public async getTablePage(index: number, page: number, pageSize: number, searchTerm: string): Promise<{
+		rows: string[][];
+		page: number;
+		pageSize: number;
+		totalRows: number;
+		totalMatchedRows: number;
+	}> {
+		const table = await this.getTablePreview(index);
+		const normalizedTerm = searchTerm.trim().toLowerCase();
+		const start = Math.max(0, page * pageSize);
+		const end = start + pageSize;
 
-	private _documentData: FitsDocumentData;
+		if (!normalizedTerm) {
+			this.tableSearchCache.delete(index);
+			return {
+				rows: table.rows.slice(start, end),
+				page,
+				pageSize,
+				totalRows: table.totalRows,
+				totalMatchedRows: table.totalRows,
+			};
+		}
 
-	private readonly _delegate: FitsDocumentDelegate;
+		const matches = this.getMatchingTableRows(index, table, normalizedTerm);
+		const rows = matches.slice(start, end).map(rowIndex => table.rows[rowIndex]);
 
-	private constructor(
-		uri: vscode.Uri,
-		initialContent: FitsDocumentData,
-		delegate: FitsDocumentDelegate
-	) {
-		super();
-		this._uri = uri;
-		this._documentData = initialContent;
-		this._delegate = delegate;
+		return {
+			rows,
+			page,
+			pageSize,
+			totalRows: table.totalRows,
+			totalMatchedRows: matches.length,
+		};
 	}
 
-	public get uri() { return this._uri; }
+	private getHdu(index: number): HduManifest {
+		const hdu = this._documentData.hdus[index];
+		if (!hdu) {
+			throw new Error(`Unable to locate HDU ${index}.`);
+		}
+		return hdu;
+	}
 
-	public get documentData(): FitsDocumentData { return this._documentData; }
+	private async getTablePreview(index: number): Promise<TablePreviewData> {
+		const cached = this.tablePreviewCache.get(index);
+		if (cached) {
+			return cached;
+		}
+		const existing = this.inflightTablePreviews.get(index);
+		if (existing) {
+			return existing;
+		}
 
-	private readonly _onDidDispose = this._register(new vscode.EventEmitter<void>());
-	/**
-	 * Fired when the document is disposed of.
-	 */
-	public readonly onDidDispose = this._onDidDispose.event;
+		const hdu = this.getHdu(index);
+		const promise = loadTablePreview(this._documentData.filePath, hdu)
+			.then((table) => {
+				this.tablePreviewCache.set(index, table);
+				this.tableSearchCache.delete(index);
+				this.inflightTablePreviews.delete(index);
+				return table;
+			})
+			.catch((error) => {
+				this.inflightTablePreviews.delete(index);
+				throw error;
+			});
+		this.inflightTablePreviews.set(index, promise);
+		return promise;
+	}
 
-	/**
-	 * Called by VS Code when there are no more references to the document.
-	 *
-	 * This happens when all editors for it have been closed.
-	 */
-	dispose(): void {
+	private getMatchingTableRows(index: number, table: TablePreviewData, term: string): number[] {
+		const cached = this.tableSearchCache.get(index);
+		let sourceIndices: number[];
+		if (cached && term.startsWith(cached.term)) {
+			sourceIndices = cached.matches;
+		} else {
+			sourceIndices = Array.from({ length: table.searchIndex.length }, (_, rowIndex) => rowIndex);
+		}
+
+		const matches: number[] = [];
+		for (const rowIndex of sourceIndices) {
+			if (table.searchIndex[rowIndex].includes(term)) {
+				matches.push(rowIndex);
+			}
+		}
+		this.tableSearchCache.set(index, { term, matches });
+		return matches;
+	}
+
+	public dispose(): void {
 		this._onDidDispose.fire();
 		super.dispose();
 	}
 }
 
-
-
-/**
- * Provider for paw draw editors.
- *
- * Paw draw editors are used for `.pawDraw` files, which are just `.png` files with a different file extension.
- *
- * This provider demonstrates:
- *
- * - How to implement a custom editor for binary files.
- * - Setting up the initial webview for a custom editor.
- * - Loading scripts and styles in a custom editor.
- * - Communication between VS Code and the custom editor.
- * - Using CustomDocuments to store information that is shared between multiple custom editors.
- * - Implementing save, undo, redo, and revert.
- * - Backing up a custom editor.
- */
 export class FitsEditorProvider implements vscode.CustomReadonlyEditorProvider<FitsDocument> {
-
-	private static newPawDrawFileId = 1;
+	private static readonly viewType = 'astronomy.fits';
+	private readonly webviews = new WebviewCollection();
 
 	public static register(context: vscode.ExtensionContext): vscode.Disposable {
 		return vscode.window.registerCustomEditorProvider(
 			FitsEditorProvider.viewType,
 			new FitsEditorProvider(context),
 			{
-				// For this demo extension, we enable `retainContextWhenHidden` which keeps the
-				// webview alive even when it is not visible. You should avoid using this setting
-				// unless is absolutely required as it does have memory overhead.
 				webviewOptions: {
 					retainContextWhenHidden: true,
 				},
 				supportsMultipleEditorsPerDocument: false,
-			});
+			}
+		);
 	}
 
-	private static readonly viewType = 'astronomy.fits';
+	constructor(private readonly context: vscode.ExtensionContext) { }
 
-	/**
-	 * Tracks all known webviews
-	 */
-	private readonly webviews = new WebviewCollection();
-
-	constructor(
-		private readonly _context: vscode.ExtensionContext
-	) { }
-
-	//#region CustomEditorProvider
-	async openCustomDocument(
+	public async openCustomDocument(
 		uri: vscode.Uri,
 		openContext: { backupId?: string },
 		_token: vscode.CancellationToken
 	): Promise<FitsDocument> {
-		const document: FitsDocument = await FitsDocument.create(uri, openContext.backupId, {
-			getFileData: async () => {
-				return {};
-			}
-		});
-
+		const document = await FitsDocument.create(uri, openContext.backupId);
 		const listeners: vscode.Disposable[] = [];
-
-		// listeners.push(document.onDidChange(e => {
-		// 	// Tell VS Code that the document has been edited by the use.
-		// 	this._onDidChangeCustomDocument.fire({
-		// 		document,
-		// 		...e,
-		// 	});
-		// }));
-
-		// listeners.push(document.onDidChangeContent(e => {
-		// 	// Update all webviews when the document changes
-		// 	for (const webviewPanel of this.webviews.get(document.uri)) {
-		// 		this.postMessage(webviewPanel, 'update', {
-		// 			edits: e.edits,
-		// 			content: e.content,
-		// 		});
-		// 	}
-		// }));
-
 		document.onDidDispose(() => disposeAll(listeners));
-
 		return document;
 	}
 
-	async resolveCustomEditor(
+	public async resolveCustomEditor(
 		document: FitsDocument,
 		webviewPanel: vscode.WebviewPanel,
 		_token: vscode.CancellationToken
 	): Promise<void> {
-		// Add the webview to our internal set of active webviews
 		this.webviews.add(document.uri, webviewPanel);
-		// console.log(document.uri, webviewPanel);
-		// console.log(FITS);
 
-
-		// Setup initial content for the webview
 		webviewPanel.webview.options = {
 			enableScripts: true,
+			localResourceRoots: [this.context.extensionUri],
 		};
 		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
-			webviewPanel.webview.onDidReceiveMessage(e => this.onMessage(document, webviewPanel, e));
-
-		// Wait for the webview to be properly ready before we init
-		webviewPanel.webview.onDidReceiveMessage(e => {
-			if (e.type === 'ready') {
-				this.postMessage(webviewPanel, 'init', {
-					value: document.documentData
-					// document.documentData
-					// value: Buffer.from(document.documentData).toString()
-				});
-			}
+		webviewPanel.webview.onDidReceiveMessage(async (message: unknown) => {
+			await this.onMessage(document, webviewPanel, message);
 		});
 	}
-	//#endregion
 
-	/**
-	 * Get the static HTML used for in our editor's webviews.
-	 */
+	private async onMessage(document: FitsDocument, panel: vscode.WebviewPanel, message: unknown): Promise<void> {
+		const payload = message as { type?: string };
+		switch (payload?.type) {
+			case 'ready':
+				this.postMessage<InitPayload>(panel, 'init', {
+					manifest: document.documentData,
+					config: {
+						defaultTablePageSize: DEFAULT_TABLE_PAGE_SIZE,
+						tablePageSizes: TABLE_PAGE_SIZES,
+					},
+				});
+				return;
+			case 'request':
+				await this.handleRequest(document, panel, message as RequestMessage);
+				return;
+			default:
+				return;
+		}
+	}
+
+	private async handleRequest(document: FitsDocument, panel: vscode.WebviewPanel, message: RequestMessage): Promise<void> {
+		const requestId = message.requestId;
+		try {
+			let result: unknown;
+			switch (message.method) {
+				case 'getHeaderCards': {
+					const hduIndex = readHduIndex(message.args);
+					result = await document.getHeaderCards(hduIndex);
+					break;
+				}
+				case 'getImagePreview': {
+						const hduIndex = readHduIndex(message.args);
+						const hdu = document.documentData.hdus[hduIndex];
+						let preview;
+						try {
+							preview = await loadImagePreview(document.documentData.filePath, hdu);
+						} catch (error) {
+							throw rewriteImagePreviewError(error, hdu);
+						}
+						result = {
+							width: preview.width,
+							height: preview.height,
+							pixels: toArrayBuffer(new Uint8Array(preview.pixels.buffer, preview.pixels.byteOffset, preview.pixels.byteLength)),
+							scaleModes: preview.scaleModes,
+							defaultScaleMode: preview.defaultScaleMode,
+							defaultStretch: preview.defaultStretch,
+							wcs: preview.wcs,
+						};
+						break;
+				}
+				case 'getTableMeta': {
+					const hduIndex = readHduIndex(message.args);
+					result = await document.getTableMeta(hduIndex);
+					break;
+				}
+				case 'getTablePage': {
+					const hduIndex = readHduIndex(message.args);
+					const page = readPage(message.args);
+					const pageSize = readPageSize(message.args);
+					const searchTerm = typeof message.args?.searchTerm === 'string' ? message.args.searchTerm : '';
+					result = await document.getTablePage(hduIndex, page, pageSize, searchTerm);
+					break;
+				}
+				default:
+					throw new Error(`Unsupported request method: ${message.method}`);
+			}
+
+			this.postMessage(panel, 'response', {
+				requestId,
+				result,
+			});
+		} catch (error: unknown) {
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			this.postMessage(panel, 'response', {
+				requestId,
+				error: errorMessage,
+			});
+		}
+	}
+
 	private getHtmlForWebview(webview: vscode.Webview): string {
-		// Local path to script and css for the webview
-		const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(
-			this._context.extensionUri, 'media', 'fitsFile.js'));
-
-		const styleResetUri = webview.asWebviewUri(vscode.Uri.joinPath(
-			this._context.extensionUri, 'media', 'reset.css'));
-
-		const styleVSCodeUri = webview.asWebviewUri(vscode.Uri.joinPath(
-			this._context.extensionUri, 'media', 'vscode.css'));
-
-		const styleMainUri = webview.asWebviewUri(vscode.Uri.joinPath(
-			this._context.extensionUri, 'media', 'fitsFile.css'));
-
-		const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(
-			this._context.extensionUri, 'media', 'logo.png'));
-
-		const logoLargeUri = webview.asWebviewUri(vscode.Uri.joinPath(
-			this._context.extensionUri, 'media', 'logo-large.png'));
-
-		// Use a nonce to whitelist which scripts can be run
 		const nonce = getNonce();
+		const extensionUri = this.context.extensionUri;
+
+		const fitsScriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'fitsFile.js'));
+		const imagePreviewScriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'simpleFitsImagePreview.js'));
+		const styleResetUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'reset.css'));
+		const styleVSCodeUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'vscode.css'));
+		const styleMainUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'fitsFile.css'));
 
 		return /* html */`
 			<!DOCTYPE html>
 			<html lang="en">
 			<head>
 				<meta charset="UTF-8">
-
-				<!--
-				Use a content security policy to only allow loading images from https or from our extension directory,
-				and only allow scripts that have a specific nonce.
-				-->
-				<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} blob:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
-
+				<meta
+					http-equiv="Content-Security-Policy"
+					content="default-src 'none'; img-src ${webview.cspSource} blob: data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource} blob: 'unsafe-eval' 'wasm-unsafe-eval'; connect-src ${webview.cspSource} blob: data:; worker-src ${webview.cspSource} blob:; child-src ${webview.cspSource} blob:; font-src ${webview.cspSource} data:;"
+				>
 				<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 				<link href="${styleResetUri}" rel="stylesheet" />
 				<link href="${styleVSCodeUri}" rel="stylesheet" />
 				<link href="${styleMainUri}" rel="stylesheet" />
 
-				<title>Fits File</title>
+				<title>MyFits</title>
 			</head>
 			<body>
-				<div class="fits-container"></div>
+				<div class="fits-container">
+					<header class="header">
+						<div class="title"></div>
+					</header>
 
-				<script nonce="${nonce}" src="${scriptUri}"></script>
+					<div class="top-container">
+						<div class="left-container"></div>
+						<div class="divider-vertical" id="divider-vertical"></div>
+						<div class="right-container">
+							<div class="placeholder header-placeholder">Select an HDU to inspect its header.</div>
+						</div>
+					</div>
+
+					<div class="divider-horizontal" id="divider-horizontal"></div>
+
+						<div class="bottom-container">
+							<div class="data-meta"></div>
+							<div class="data-stack">
+								<div class="placeholder data-placeholder">Select an HDU to preview image or table data.</div>
+								<div class="image-pane hidden"></div>
+								<div class="table-pane"></div>
+							</div>
+						</div>
+
+							<footer>MyFilter @ AstroMy Project | Designed by&nbsp;<a href="https://lmytime.com">Mingyu Li</a></footer>
+						</div>
+				<script nonce="${nonce}" src="${imagePreviewScriptUri}"></script>
+				<script nonce="${nonce}" src="${fitsScriptUri}"></script>
 			</body>
 			</html>`;
 	}
 
-
-	private _requestId = 1;
-	private readonly _callbacks = new Map<number, (response: any) => void>();
-
-	private postMessageWithResponse<R = unknown>(panel: vscode.WebviewPanel, type: string, body: any): Promise<R> {
-		const requestId = this._requestId++;
-		const p = new Promise<R>(resolve => this._callbacks.set(requestId, resolve));
-		panel.webview.postMessage({ type, requestId, body });
-		return p;
-	}
-
-	private postMessage(panel: vscode.WebviewPanel, type: string, body: any): void {
+	private postMessage<T>(panel: vscode.WebviewPanel, type: string, body: T): void {
 		panel.webview.postMessage({ type, body });
 	}
+}
 
-		private onMessage(document: FitsDocument, panel: vscode.WebviewPanel, message: any) {
-			switch (message.type) {
-
-				case 'response':
-					{
-						const callback = this._callbacks.get(message.requestId);
-						callback?.(message.body);
-						return;
-					}
-				case 'requestImage':
-					this.handleImageRequest(document, panel, message);
-					return;
-			}
-		}
-
-		private async handleImageRequest(document: FitsDocument, panel: vscode.WebviewPanel, message: any) {
-			const index = typeof message?.hduIndex === 'number' ? message.hduIndex : -1;
-			if (index < 0) {
-				this.postMessage(panel, 'payloadError', { index, error: 'Invalid HDU index.' });
-				return;
-			}
-
-			const docData = document.documentData;
-			const target = docData.hdus[index];
-			if (!target) {
-				this.postMessage(panel, 'payloadError', { index, error: 'Unable to locate the requested HDU.' });
-				return;
-			}
-
-			try {
-				const preview = await loadImagePreviewAtOffset(docData.filePath, target);
-				if (!preview) {
-					throw new Error('Image payload is unavailable for this HDU.');
-				}
-				target.imagePreview = preview;
-				target.dataSkippedReason = undefined;
-
-				const payload = { index, preview };
-				for (const view of this.webviews.get(document.uri)) {
-					this.postMessage(view, 'imageLoaded', payload);
-				}
-			} catch (error: any) {
-				const messageText = error instanceof Error ? error.message : String(error);
-				this.postMessage(panel, 'payloadError', { index, error: messageText });
-			}
-		}
-	}
-
-
-
-/**
- * Tracks all webviews.
- */
 class WebviewCollection {
+	private readonly webviews = new Set<{ resource: string; webviewPanel: vscode.WebviewPanel }>();
 
-	private readonly _webviews = new Set<{
-		readonly resource: string;
-		readonly webviewPanel: vscode.WebviewPanel;
-	}>();
-
-	/**
-	 * Get all known webviews for a given uri.
-	 */
-	public *get(uri: vscode.Uri): Iterable<vscode.WebviewPanel> {
-		const key = uri.toString();
-		for (const entry of this._webviews) {
-			if (entry.resource === key) {
-				yield entry.webviewPanel;
-			}
-		}
-	}
-
-	/**
-	 * Add a new webview to the collection.
-	 */
-	public add(uri: vscode.Uri, webviewPanel: vscode.WebviewPanel) {
+	public add(uri: vscode.Uri, webviewPanel: vscode.WebviewPanel): void {
 		const entry = { resource: uri.toString(), webviewPanel };
-		this._webviews.add(entry);
-
+		this.webviews.add(entry);
 		webviewPanel.onDidDispose(() => {
-			this._webviews.delete(entry);
+			this.webviews.delete(entry);
 		});
 	}
 }
 
-function formatFileSize(bytes: number): string {
+function readHduIndex(args: Record<string, any> | undefined): number {
+	const hduIndex = args?.hduIndex;
+	if (typeof hduIndex !== 'number' || !Number.isInteger(hduIndex) || hduIndex < 0) {
+		throw new Error('A valid HDU index is required.');
+	}
+	return hduIndex;
+}
+
+function readPage(args: Record<string, any> | undefined): number {
+	const page = args?.page;
+	if (typeof page !== 'number' || !Number.isInteger(page) || page < 0) {
+		throw new Error('A valid page is required.');
+	}
+	return page;
+}
+
+function readPageSize(args: Record<string, any> | undefined): number {
+	const pageSize = args?.pageSize;
+	if (typeof pageSize !== 'number' || !Number.isInteger(pageSize) || pageSize <= 0 || pageSize > 5000) {
+		throw new Error('A valid page size is required.');
+	}
+	return pageSize;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+function rewriteImagePreviewError(error: unknown, hdu: HduManifest): Error {
+	const message = error instanceof Error ? error.message : String(error);
+	if (/Array buffer allocation failed|Invalid typed array length|Cannot create a Buffer larger than/i.test(message)) {
+		const dimensionsLabel = hdu.dimensions.length ? hdu.dimensions.join('x') : 'unknown size';
+		const sizeLabel = humanFileSize(hdu.dataByteLength);
+		return new Error(
+			`This image HDU is too large for the built-in preview (${dimensionsLabel}, ${sizeLabel} raw data). ` +
+			`Try another HDU or use a downsampled FITS file.`
+		);
+	}
+	return error instanceof Error ? error : new Error(message);
+}
+
+function humanFileSize(bytes: number): string {
 	if (!bytes) {
 		return '0 B';
 	}

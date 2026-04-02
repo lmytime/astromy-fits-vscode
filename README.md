@@ -22,17 +22,16 @@ Table data:
 ## Features
 
 - Inspect every HDU header inside FITS, PHA, PI, ARF, and related files with instant keyword search.
-- Render interactive 2‑D images with pixel-level zooming, panning, colour-map cycling, and vmin/vmax presets (ZScale or 90–100 % coverage). WCS keywords (CD/PC+CDELT) automatically expose RA/Dec in the metadata bar.
-- Preview binary/ASCII tables with column metadata, row filtering, and a guaranteed “first row” view even when the full HDU exceeds the inline limit.
-- Skip bulk payloads automatically when images exceed ~30 MB or tables exceed ~15 MB (decimal base), while offering a one-click “Load […] anyway” action for huge datasets.
+- Render interactive 2‑D images with pixel-level zooming, panning, colour-map cycling, and vmin/vmax presets (ZScale, common percentiles, or Min/Max). WCS keywords (CD/PC+CDELT/CROTA) expose RA/Dec directly in the metadata bar.
+- Preview binary and ASCII tables with column metadata, pagination, and global row search.
+- Keep previews responsive by loading headers first and then fetching image/table payloads on demand.
 
 > This extension is still under active development; please share ideas or issues!
 
 ## Known Issues
 
-- Extremely large files (>2 GB) are loaded in header-only mode; image/table payloads are skipped with a warning to keep VS Code responsive.
-- Variable-length or highly custom table descriptors are surfaced as `[unsupported]` cells in the preview.
-- Images are not shwon in pixelized grid.
+- Extremely large image/table HDUs can still exceed VS Code memory limits and will show a friendly preview error instead of hanging.
+- Highly custom FITS table descriptors are normalized into string previews and may not preserve every original low-level formatting detail.
 
 ## Release Notes
 
