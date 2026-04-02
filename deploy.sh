@@ -4,3 +4,5 @@
 # vsce login lmytime
 vsce package
 vsce publish
+# open vscode marketplace
+ovsx publish
